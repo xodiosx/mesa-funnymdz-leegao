@@ -1,4 +1,4 @@
-name: release PanVK for Termux (aarch64, native)
+name: Build PanVK for Termux (aarch64, native)
 
 on:
   push:
@@ -75,20 +75,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify sigbus.patch exists at repo root
-        run: |
-          set -euo pipefail
-          PATCH="${{ github.workspace }}/sigbus.patch"
-          if [[ ! -f "$PATCH" ]]; then
-            echo "ERROR: sigbus.patch not found at repo root ($PATCH)"
-            ls -la "${{ github.workspace }}"
-            exit 1
-          fi
-          echo "Found patch:"
-          ls -lh "$PATCH"
-          echo "--- first 30 lines ---"
-          head -n 30 "$PATCH"
-
       - name: Build PanVK (${{ matrix.build-type }}) inside Termux container
         run: |
           set -euo pipefail
@@ -98,7 +84,6 @@ jobs:
 
           docker run --rm \
             -v "${{ github.workspace }}/termux-out-${{ matrix.build-type }}:/termux-out" \
-            -v "${{ github.workspace }}:/patch:ro" \
             termux/termux-docker:aarch64 \
             bash -c '
               set -euo pipefail
@@ -128,34 +113,15 @@ jobs:
                 bison flex cmake glslang shaderc vulkan-headers \
                 vulkan-loader-generic libandroid-shmem libdrm libxcb \
                 xorgproto libx11 libxshmfence zlib zstd libexpat libclc spirv-llvm-translator \
-                libxrandr libxrandr-static patch
+                libxrandr libxrandr-static
 
               pip install --break-system-packages meson mako pyyaml packaging
 
               mkdir -p "$TMPDIR"
               cd "$TMPDIR"
               rm -rf mesa-panvk
-              git clone --depth 1 https://github.com/xodiosx/mesa-panvk-g57.git mesa-panvk
+              git clone --depth 1 https://github.com/xodiosx/mesa-funnymdz-leegao.git mesa-panvk
               cd mesa-panvk
-
-              # ── Apply sigbus.patch from repo root (mounted at /patch) ──
-              if [[ -f /patch/sigbus.patch ]]; then
-                echo "=============================================="
-                echo "Applying /patch/sigbus.patch ..."
-                echo "=============================================="
-                if git apply --verbose /patch/sigbus.patch; then
-                  echo ">>> git apply succeeded"
-                else
-                  echo ">>> git apply failed, falling back to patch(1)"
-                  patch -p1 --batch --forward < /patch/sigbus.patch
-                fi
-                echo "--- patch applied, diff stat: ---"
-                git --no-pager diff --stat || true
-                echo "--- end of diff stat ---"
-              else
-                echo "WARNING: /patch/sigbus.patch not found, building unpatched"
-                ls -la /patch || true
-              fi
 
               meson setup build-bionic \
                 -Dbuildtype="$BUILD_TYPE" \
