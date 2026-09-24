@@ -125,7 +125,6 @@ jobs:
               git clone --depth 1 https://github.com/xodiosx/mesa-funnymdz-leegao.git mesa-panvk
               cd mesa-panvk
 
-              # ── Apply the Mali-G57 workaround patch (tolerant) ──
               echo "=============================================="
               echo "Applying panvk-mali-g57-workaround.patch ..."
               echo "=============================================="
@@ -171,12 +170,12 @@ jobs:
               OPTIONS_FILE="meson.options"
               [[ -f "$OPTIONS_FILE" ]] || OPTIONS_FILE="meson_options.txt"
               echo "Options file: $OPTIONS_FILE"
-              grep -oE "option\(\s*.[a-z0-9_-]+" "$OPTIONS_FILE" \
-                | sed -E "s/option\(\s*.//" | sort -u | tr "\n" " " || true
+              grep -oE "option\([^a-zA-Z0-9_-]+[a-z0-9_-]+" "$OPTIONS_FILE" \
+                | sed -E "s/option\([^a-zA-Z0-9_-]+//" | sort -u | tr "\n" " " || true
               echo
 
               has_option() {
-                grep -qE "option\(\s*['\"]$1['\"]" "$OPTIONS_FILE"
+                grep -qE "option\([^a-zA-Z0-9_-]+$1[^a-zA-Z0-9_-]" "$OPTIONS_FILE"
               }
 
               MESON_ARGS=(
@@ -198,7 +197,6 @@ jobs:
                 "-Dcpp_link_args=-landroid-shmem"
               )
 
-              # Only pass optional flags if the repo knows about them
               if has_option "panfrost-kmds"; then
                 MESON_ARGS+=("-Dpanfrost-kmds=kbase,panthor")
                 echo ">>> panfrost-kmds supported; adding kbase,panthor"
@@ -297,6 +295,8 @@ jobs:
             - `panvk-mali-g57-workaround.patch` applied from repo root
               (tolerant application; critical hunks verified in-tree).
             - Includes `exec_init_failed` fallback for Mali-G57 (arch 9, JM).
+            - Meson options are probed at configure time so the workflow
+              adapts to whichever options the repo actually exposes.
 
             ### Files
             - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
