@@ -145,10 +145,6 @@ jobs:
                 echo ">>> patch(1) returned non-zero (expected if some hunks were skipped)"
               fi
 
-              echo "--- diff stat after patch ---"
-              git --no-pager diff --stat || true
-              echo "--- end diff stat ---"
-
               echo "--- reject files ---"
               find . -name "*.rej" -print || true
               echo "--- end reject files ---"
@@ -168,25 +164,59 @@ jobs:
                 exit 1
               fi
 
-              meson setup build-bionic \
-                -Dbuildtype="$BUILD_TYPE" \
-                -Dvulkan-drivers=panfrost \
-                -Dgallium-drivers= \
-                -Dpanfrost-kmds=kbase,panthor \
-                -Dplatforms=x11 \
-                -Dglx=disabled \
-                -Degl=disabled \
-                -Dopengl=false \
-                -Dgles1=disabled \
-                -Dgles2=disabled \
-                -Dbuild-tests=false \
-                -Dlibunwind=disabled \
-                -Dvalgrind=disabled \
-                -Dperfetto=false \
-                -Dpanvk-use-kbase=true \
-                -Dprefix="$PREFIX" \
-                -Dc_link_args=-landroid-shmem \
-                -Dcpp_link_args=-landroid-shmem
+              # ── Probe available Meson options ──
+              echo "=============================================="
+              echo "Probing available Meson options ..."
+              echo "=============================================="
+              OPTIONS_FILE="meson.options"
+              [[ -f "$OPTIONS_FILE" ]] || OPTIONS_FILE="meson_options.txt"
+              echo "Options file: $OPTIONS_FILE"
+              grep -oE "option\(\s*.[a-z0-9_-]+" "$OPTIONS_FILE" \
+                | sed -E "s/option\(\s*.//" | sort -u | tr "\n" " " || true
+              echo
+
+              has_option() {
+                grep -qE "option\(\s*['\"]$1['\"]" "$OPTIONS_FILE"
+              }
+
+              MESON_ARGS=(
+                "-Dbuildtype=$BUILD_TYPE"
+                "-Dvulkan-drivers=panfrost"
+                "-Dgallium-drivers="
+                "-Dplatforms=x11"
+                "-Dglx=disabled"
+                "-Degl=disabled"
+                "-Dopengl=false"
+                "-Dgles1=disabled"
+                "-Dgles2=disabled"
+                "-Dbuild-tests=false"
+                "-Dlibunwind=disabled"
+                "-Dvalgrind=disabled"
+                "-Dperfetto=false"
+                "-Dprefix=$PREFIX"
+                "-Dc_link_args=-landroid-shmem"
+                "-Dcpp_link_args=-landroid-shmem"
+              )
+
+              # Only pass optional flags if the repo knows about them
+              if has_option "panfrost-kmds"; then
+                MESON_ARGS+=("-Dpanfrost-kmds=kbase,panthor")
+                echo ">>> panfrost-kmds supported; adding kbase,panthor"
+              fi
+              if has_option "panvk-use-kbase"; then
+                MESON_ARGS+=("-Dpanvk-use-kbase=true")
+                echo ">>> panvk-use-kbase supported; enabling"
+              else
+                echo ">>> panvk-use-kbase not present in this repo (likely default)"
+              fi
+              if has_option "panfrost-rust"; then
+                MESON_ARGS+=("-Dpanfrost-rust=false")
+              fi
+
+              echo "=============================================="
+              echo "meson setup with: ${MESON_ARGS[*]}"
+              echo "=============================================="
+              meson setup build-bionic "${MESON_ARGS[@]}"
 
               ninja -C build-bionic -j$(nproc) \
                 src/panfrost/vulkan/libvulkan_panfrost.so
