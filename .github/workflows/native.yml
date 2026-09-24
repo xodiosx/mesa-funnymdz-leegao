@@ -114,7 +114,8 @@ jobs:
                 bison flex cmake glslang shaderc vulkan-headers \
                 vulkan-loader-generic libandroid-shmem libdrm libxcb \
                 xorgproto libx11 libxshmfence zlib zstd libexpat \
-                libclc spirv-llvm-translator libxrandr libxrandr-static file
+                libclc spirv-llvm-translator libxrandr libxrandr-static file \
+                patch
 
               pip install --break-system-packages meson mako pyyaml packaging
 
@@ -124,7 +125,7 @@ jobs:
               git clone --depth 1 https://github.com/xodiosx/mesa-funnymdz-leegao.git mesa-panvk
               cd mesa-panvk
 
-              # ── Apply the Mali-G57 workaround patch ──
+              # ── Apply the Mali-G57 workaround patch (tolerant) ──
               echo "=============================================="
               echo "Applying panvk-mali-g57-workaround.patch ..."
               echo "=============================================="
@@ -133,15 +134,39 @@ jobs:
                 ls -la
                 exit 1
               fi
-              if git apply --verbose panvk-mali-g57-workaround.patch; then
-                echo ">>> patch applied successfully"
+
+              if git apply --check panvk-mali-g57-workaround.patch 2>/dev/null; then
+                echo ">>> git apply --check passed; applying cleanly"
+                git apply --verbose panvk-mali-g57-workaround.patch
               else
-                echo ">>> git apply failed, falling back to patch(1)"
-                patch -p1 --batch --forward < panvk-mali-g57-workaround.patch
+                echo ">>> git apply --check failed; falling back to patch -p1 --forward"
+                patch -p1 --forward --no-backup-if-mismatch \
+                  < panvk-mali-g57-workaround.patch || true
+                echo ">>> patch(1) returned non-zero (expected if some hunks were skipped)"
               fi
+
               echo "--- diff stat after patch ---"
               git --no-pager diff --stat || true
               echo "--- end diff stat ---"
+
+              echo "--- reject files ---"
+              find . -name "*.rej" -print || true
+              echo "--- end reject files ---"
+
+              echo "=============================================="
+              echo "Sanity check: critical patch content present ..."
+              echo "=============================================="
+              if grep -q "exec_init_failed" src/panfrost/lib/kmod/pan_kmod.h && \
+                 grep -q "exec_init_failed" src/panfrost/lib/kmod/kbase_kmod.c && \
+                 grep -q "mempools.rw"    src/panfrost/vulkan/panvk_vX_shader.c; then
+                echo ">>> PASS: exec_init_failed field and shader fallback are in the tree"
+              else
+                echo ">>> FAIL: critical patch content missing; cannot build" >&2
+                grep -n "exec_init_failed" src/panfrost/lib/kmod/pan_kmod.h   || echo "missing in pan_kmod.h"
+                grep -n "exec_init_failed" src/panfrost/lib/kmod/kbase_kmod.c || echo "missing in kbase_kmod.c"
+                grep -n "mempools.rw"      src/panfrost/vulkan/panvk_vX_shader.c || echo "missing in panvk_vX_shader.c"
+                exit 1
+              fi
 
               meson setup build-bionic \
                 -Dbuildtype="$BUILD_TYPE" \
@@ -230,9 +255,7 @@ jobs:
             ## PanVK for Termux (aarch64, native build)
 
             Built natively inside Termux (`termux/termux-docker:aarch64`)
-            on `ubuntu-24.04-arm` — same toolchain class as an on-device
-            native Termux build (Termux Clang/LLD, target
-            `aarch64-linux-android35`).
+            on `ubuntu-24.04-arm`.
 
             **Source:** `xodiosx/mesa-funnymdz-leegao`
             **Build date (UTC):** `${{ needs.prepare.outputs.date }}`
@@ -241,9 +264,9 @@ jobs:
             **Build types:** `${{ needs.prepare.outputs.types }}`
 
             ### Build customizations
-            - `panvk-mali-g57-workaround.patch` applied from repo root.
-              Includes `exec_init_failed` fallback and defensive cleanup
-              paths for Mali-G57 (arch 9, JM).
+            - `panvk-mali-g57-workaround.patch` applied from repo root
+              (tolerant application; critical hunks verified in-tree).
+            - Includes `exec_init_failed` fallback for Mali-G57 (arch 9, JM).
 
             ### Files
             - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
