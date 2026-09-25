@@ -80,10 +80,6 @@ jobs:
           mkdir -p "${{ github.workspace }}/ci-scripts"
           cat > "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py" << 'PYEOF'
           #!/usr/bin/env python3
-          """
-          Emit a `meson setup` command with options that exist in the repo.
-          Reads meson.options to pick flags that are actually supported.
-          """
           import os
           import re
           import sys
@@ -113,7 +109,7 @@ jobs:
               f"-Dbuildtype={build_type}",
               "-Dvulkan-drivers=panfrost",
               "-Dgallium-drivers=",
-              "-Dplatforms=android,x11",
+              "-Dplatforms=x11",
               "-Dglx=disabled",
               "-Degl=disabled",
               "-Dopengl=false",
@@ -142,6 +138,9 @@ jobs:
               print(f"  {a}{sep}")
           PYEOF
           chmod +x "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py"
+
+          echo "--- wrote ci-scripts/gen_meson_cmd.py ---"
+          ls -la "${{ github.workspace }}/ci-scripts/"
 
       - name: Build PanVK (${{ matrix.build-type }}) inside Termux container
         run: |
@@ -180,7 +179,7 @@ jobs:
                 vulkan-loader-generic libandroid-shmem libdrm libxcb \
                 xorgproto libx11 libxshmfence zlib zstd libexpat \
                 libclc spirv-llvm-translator libxrandr libxrandr-static file \
-                patch ndk-sysroot libandroid-stub*
+                patch
 
               pip install --break-system-packages \
                 meson mako pyyaml packaging ply setuptools
@@ -218,42 +217,59 @@ jobs:
               done
               echo "Overlay done."
 
-              echo "--- winlatormali-ci meson.build: Android/CLC related lines ---"
-              grep -n "with_clc\|with_panfrost_vk\|platform-sdk-version\|__ANDROID_API__\|ANDROID_API_LEVEL" \
-                meson.build || true
-              echo "--- end ---"
+              # ═══════════════════════════════════════════════════════
+              # Discover every *.patch file in the repo root and apply
+              # each one tolerantly. Partial application is fine; we do
+              # not fail the build on individual hunk mismatches.
+              # ═══════════════════════════════════════════════════════
+              echo "=============================================="
+              echo "Discovering *.patch files in repo root ..."
+              echo "=============================================="
 
-              echo "=============================================="
-              echo "Applying panvk-mali-g57-workaround.patch ..."
-              echo "=============================================="
-              if [[ ! -f panvk-mali-g57-workaround.patch ]]; then
-                echo ">>> Patch not present; skipping safely."
+              PATCHES=()
+              while IFS= read -r f; do
+                [[ -n "$f" ]] && PATCHES+=("$f")
+              done < <(find . -maxdepth 1 -name "*.patch" -type f -print | sort)
+
+              if [[ ${#PATCHES[@]} -eq 0 ]]; then
+                echo ">>> No .patch files found in repo root; nothing to apply."
               else
-                if git apply --check panvk-mali-g57-workaround.patch 2>/dev/null; then
-                  echo ">>> clean apply"
-                  git apply --verbose panvk-mali-g57-workaround.patch
-                else
-                  echo ">>> git apply --check failed; using patch(1) forward"
-                  patch -p1 --forward --no-backup-if-mismatch \
-                    < panvk-mali-g57-workaround.patch || true
-                fi
+                echo ">>> Found ${#PATCHES[@]} patch file(s):"
+                for p in "${PATCHES[@]}"; do
+                  echo "    - $p"
+                done
+                echo
+
+                for p in "${PATCHES[@]}"; do
+                  echo "----------------------------------------------"
+                  echo ">>> Applying: $p"
+                  echo "----------------------------------------------"
+
+                  if git apply --check "$p" 2>/dev/null; then
+                    echo "    strategy: git apply (clean)"
+                    if git apply --verbose "$p"; then
+                      echo "    result:   applied"
+                    else
+                      echo "    result:   git apply failed after --check passed (unexpected)"
+                      echo "    fallback: patch -p1 --forward"
+                      patch -p1 --forward --no-backup-if-mismatch < "$p" || true
+                    fi
+                  else
+                    echo "    strategy: patch -p1 --forward (git apply check failed)"
+                    patch -p1 --forward --no-backup-if-mismatch < "$p" || true
+                    echo "    result:   partial-or-full (see log above for which hunks applied)"
+                  fi
+                  echo
+                done
               fi
 
-              echo "--- reject files ---"
+              echo "=============================================="
+              echo "Reject files after patching ..."
+              echo "=============================================="
               find . -name "*.rej" -print || true
-
               echo "=============================================="
-              echo "Sanity: exec_init_failed / shader fallback present? ..."
+              echo "End reject files."
               echo "=============================================="
-              grep -q "exec_init_failed" src/panfrost/lib/kmod/pan_kmod.h \
-                && echo "  pan_kmod.h:         present" \
-                || echo "  pan_kmod.h:         MISSING"
-              grep -q "exec_init_failed" src/panfrost/lib/kmod/kbase_kmod.c \
-                && echo "  kbase_kmod.c:       present" \
-                || echo "  kbase_kmod.c:       MISSING"
-              grep -q "mempools.rw" src/panfrost/vulkan/panvk_vX_shader.c \
-                && echo "  panvk_vX_shader.c:  present" \
-                || echo "  panvk_vX_shader.c:  MISSING"
 
               MESON_SH="$TMPDIR/meson_cmd.sh"
               rm -f "$MESON_SH"
@@ -339,12 +355,10 @@ jobs:
           body: |
             ## PanVK for Termux (aarch64, native build)
 
-            Source tree fully overlaid from
-            `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci` (including
-            its `meson.build`, which auto-detects Android API level and
-            avoids the CLC/SPIRV-Tools path).
-            `panvk-mali-g57-workaround.patch` applied on top for the
-            `exec_init_failed` fallback if not already present.
+            Source overlaid from
+            `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci`.
+            All `*.patch` files in the repo root applied on top
+            (tolerant application).
 
             **Date (UTC):** `${{ needs.prepare.outputs.date }}`
             **Time (UTC):** `${{ needs.prepare.outputs.time }}`
