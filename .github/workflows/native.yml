@@ -83,9 +83,10 @@ jobs:
           """
           Read meson.options, emit a `meson setup` shell command on stdout.
 
-          PanVK-only build: CLC (OpenCL C compiler) is explicitly disabled
-          because it requires a SPIRV-Tools feature (PR #5534) that the
-          Termux spirv-tools package does not ship. PanVK does not need CLC.
+          PanVK-only build: mesa-clc is set to 'auto' so Meson skips
+          building CLC unless something actually requires it. Since
+          Vulkan-only, it won't, and the SPIRV-Tools PR #5534 feature
+          check is never run.
           """
           import os
           import re
@@ -134,21 +135,23 @@ jobs:
               "-Dcpp_link_args=-landroid-shmem",
           ]
 
-          # Disable CLC / OpenCL C compiler: not needed for PanVK, and it
-          # requires a SPIRV-Tools feature the Termux package lacks.
+          # mesa-clc accepts: enabled | system | auto.
+          # 'auto' skips CLC when nothing needs it (PanVK doesn't).
           if "mesa-clc" in opts:
-              args.append("-Dmesa-clc=disabled")
-              print(">>> Adding: -Dmesa-clc=disabled", file=sys.stderr)
+              args.append("-Dmesa-clc=auto")
+              print(">>> Adding: -Dmesa-clc=auto", file=sys.stderr)
+
           if "install-mesa-clc" in opts:
               args.append("-Dinstall-mesa-clc=false")
               print(">>> Adding: -Dinstall-mesa-clc=false", file=sys.stderr)
-          if "microsoft-clc" in opts:
-              args.append("-Dmicrosoft-clc=disabled")
-              print(">>> Adding: -Dmicrosoft-clc=disabled", file=sys.stderr)
+
           if "gallium-clover" in opts:
               args.append("-Dgallium-clover=false")
+              print(">>> Adding: -Dgallium-clover=false", file=sys.stderr)
+
           if "gallium-rusticl" in opts:
               args.append("-Dgallium-rusticl=false")
+              print(">>> Adding: -Dgallium-rusticl=false", file=sys.stderr)
 
           if "panfrost-kmds" in opts:
               args.append("-Dpanfrost-kmds=kbase,panthor")
@@ -215,7 +218,7 @@ jobs:
               git clone --depth 1 https://github.com/xodiosx/mesa-funnymdz-leegao.git mesa-panvk
               cd mesa-panvk
 
-              # ── Fetch winlatormali-ci reference tree (under $TMPDIR, not /tmp) ──
+              # ── Fetch winlatormali-ci reference tree ──
               echo "=============================================="
               echo "Fetching winlatormali-ci reference tree ..."
               echo "=============================================="
@@ -226,7 +229,6 @@ jobs:
                 https://github.com/mexicanbr0auth/mesa-panvk-g57.git \
                 "$REF_DIR"
 
-              # ── Diff against our tree ──
               echo "=============================================="
               echo "Files that differ from winlatormali-ci ..."
               echo "=============================================="
@@ -247,7 +249,7 @@ jobs:
                 | grep "^Only in $REF_DIR" \
                 | tee "$TMPDIR/diff-only-ref.txt" || true
 
-              # ── Overlay differing files from the reference tree ──
+              # ── Overlay differing files ──
               echo "=============================================="
               echo "Overlaying winlatormali-ci files ..."
               echo "=============================================="
@@ -261,7 +263,7 @@ jobs:
               done
               echo "Overlay done."
 
-              # ── Apply our own patch on top ──
+              # ── Apply our own patch ──
               echo "=============================================="
               echo "Applying panvk-mali-g57-workaround.patch ..."
               echo "=============================================="
@@ -279,7 +281,6 @@ jobs:
               echo "--- reject files ---"
               find . -name "*.rej" -print || true
 
-              # ── Sanity ──
               if grep -q "exec_init_failed" src/panfrost/lib/kmod/pan_kmod.h && \
                  grep -q "exec_init_failed" src/panfrost/lib/kmod/kbase_kmod.c && \
                  grep -q "mempools.rw"    src/panfrost/vulkan/panvk_vX_shader.c; then
@@ -289,14 +290,13 @@ jobs:
                 exit 1
               fi
 
-              # ── Generate meson command ──
               MESON_SH="$TMPDIR/meson_cmd.sh"
               rm -f "$MESON_SH"
               python3 /ci-scripts/gen_meson_cmd.py > "$MESON_SH"
               cat "$MESON_SH"
               bash "$MESON_SH"
 
-              # ── Archive source (before building, so it is clean) ──
+              # ── Archive source ──
               echo "=============================================="
               echo "Archiving source tree ..."
               echo "=============================================="
@@ -309,7 +309,6 @@ jobs:
 
               cd mesa-panvk
 
-              # ── Build ──
               KBASE_COUNT=$(grep -c "kbase_kmod.c.o" build-bionic/build.ninja || true)
               PANTHOR_COUNT=$(grep -c "panthor_kmod.c.o" build-bionic/build.ninja || true)
               echo "kbase_kmod.c.o entries:   $KBASE_COUNT"
@@ -389,15 +388,13 @@ jobs:
             **Build types:** `${{ needs.prepare.outputs.types }}`
 
             ### Build customizations
-            - `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci` overlaid
-              onto the base tree (Mali-G57 fixes).
+            - `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci` overlaid.
             - `panvk-mali-g57-workaround.patch` applied on top.
             - `exec_init_failed` fallback for Mali-G57 (arch 9, JM).
             - `panfrost-kmds=kbase,panthor` — both backends compiled.
             - `platform-sdk-version=35` + `-D__ANDROID_API__=35` — exposes
-              Bionic's `sync_merge` / `sync_wait` for the panthor backend.
-            - CLC/OpenCL C compiler disabled (PanVK does not need it; the
-              Termux SPIRV-Tools package lacks a required upstream feature).
+              Bionic's `sync_merge` / `sync_wait` for panthor.
+            - `mesa-clc=auto` — CLC skipped since nothing needs it.
 
             ### Files
             - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
