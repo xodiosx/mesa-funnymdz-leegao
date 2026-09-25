@@ -132,6 +132,10 @@ jobs:
               args.append("-Dpanvk-use-kbase=true")
               print(">>> Adding: -Dpanvk-use-kbase=true", file=sys.stderr)
 
+          if "spirv-tools" in opts:
+              args.append("-Dspirv-tools=disabled")
+              print(">>> Adding: -Dspirv-tools=disabled", file=sys.stderr)
+
           print("meson setup build-bionic \\")
           for i, a in enumerate(args):
               sep = "" if i == len(args) - 1 else " \\"
@@ -139,18 +143,15 @@ jobs:
           PYEOF
           chmod +x "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py"
 
-          echo "--- wrote ci-scripts/gen_meson_cmd.py ---"
-          ls -la "${{ github.workspace }}/ci-scripts/"
-
       - name: Build PanVK (${{ matrix.build-type }}) inside Termux container
         run: |
           set -euo pipefail
 
-          mkdir -p "${{ github.workspace }}/termux-out-${{ matrix.build-type }}"
-          chmod 777 "${{ github.workspace }}/termux-out-${{ matrix.build-type }}"
+          mkdir -p "${{ github.workspace }}/out-${{ matrix.build-type }}"
+          chmod 777 "${{ github.workspace }}/out-${{ matrix.build-type }}"
 
           docker run --rm \
-            -v "${{ github.workspace }}/termux-out-${{ matrix.build-type }}:/termux-out" \
+            -v "${{ github.workspace }}/out-${{ matrix.build-type }}:/out" \
             -v "${{ github.workspace }}/ci-scripts:/ci-scripts:ro" \
             termux/termux-docker:aarch64 \
             bash -c '
@@ -217,11 +218,6 @@ jobs:
               done
               echo "Overlay done."
 
-              # ═══════════════════════════════════════════════════════
-              # Discover every *.patch file in the repo root and apply
-              # each one tolerantly. Partial application is fine; we do
-              # not fail the build on individual hunk mismatches.
-              # ═══════════════════════════════════════════════════════
               echo "=============================================="
               echo "Discovering *.patch files in repo root ..."
               echo "=============================================="
@@ -278,15 +274,31 @@ jobs:
               bash "$MESON_SH"
 
               echo "=============================================="
-              echo "Archiving source tree ..."
+              echo "Archiving source tree (compact) ..."
               echo "=============================================="
-              tar -czf /termux-out/source.tar.gz \
-                --exclude="./.git" \
+              # --exclude-vcs removes .git, .gitignore, .gitmodules, etc.
+              # Also drop .github, build dirs, subproject caches, and any
+              # patch leftovers so the archive is genuinely source-only.
+              tar -czf /out/source.tar.gz \
+                --exclude-vcs \
+                --exclude="./.github" \
                 --exclude="./build-bionic" \
                 --exclude="./build-host" \
+                --exclude="./build-*" \
                 --exclude="./subprojects/packagecache" \
-                -C "$TMPDIR/mesa-panvk" .
-              ls -lh /termux-out/source.tar.gz
+                --exclude="./subprojects/*/packagecache" \
+                --exclude="*.rej" \
+                --exclude="*.orig" \
+                --exclude="*.bak" \
+                --exclude="*.o" \
+                --exclude="*.a" \
+                -C "$TMPDIR/mesa-panvk" \
+                .
+              ls -lh /out/source.tar.gz
+              echo "Source archive contents (top level):"
+              tar -tzf /out/source.tar.gz | head -20
+              echo "Total entries:"
+              tar -tzf /out/source.tar.gz | wc -l
 
               echo "=============================================="
               echo "Building PanVK ..."
@@ -294,13 +306,16 @@ jobs:
               ninja -C build-bionic -j$(nproc) \
                 src/panfrost/vulkan/libvulkan_panfrost.so
 
-              mkdir -p /termux-out/lib
-              mkdir -p /termux-out/share/vulkan/icd.d
+              echo "=============================================="
+              echo "Packaging driver files ..."
+              echo "=============================================="
+              mkdir -p /out/driver/lib
+              mkdir -p /out/driver/share/vulkan/icd.d
 
               cp build-bionic/src/panfrost/vulkan/libvulkan_panfrost.so \
-                 /termux-out/lib/libvulkan_panfrost.so
+                 /out/driver/lib/libvulkan_panfrost.so
 
-              cat > /termux-out/share/vulkan/icd.d/panfrost_icd.aarch64.json <<JSON
+              cat > /out/driver/share/vulkan/icd.d/panfrost_icd.aarch64.json <<JSON
               {
                   "ICD": {
                       "api_version": "1.4.354",
@@ -311,27 +326,36 @@ jobs:
               }
               JSON
 
-              echo "=== /termux-out ==="
-              find /termux-out -type f
+              echo "=== /out ==="
+              find /out -type f
               echo "=== sizes ==="
-              ls -lh /termux-out/lib/ /termux-out/source.tar.gz
+              ls -lh /out/source.tar.gz /out/driver/lib/
             '
 
-      - name: Package tarball (${{ matrix.build-type }})
+      - name: Package driver tarball (${{ matrix.build-type }})
         run: |
           set -euo pipefail
-          cd "termux-out-${{ matrix.build-type }}"
-          TARBALL="panvk-termux-aarch64-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}.tar.gz"
-          tar -czvf "../${TARBALL}" .
-          ls -lh "../${TARBALL}"
+          cd "${{ github.workspace }}/out-${{ matrix.build-type }}"
 
-      - name: Upload artifact
+          # Driver bundle: lib/ + share/ only
+          DRIVER_TARBALL="panvk-termux-aarch64-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}.tar.gz"
+          tar -czvf "../${DRIVER_TARBALL}" driver/
+
+          echo "=== Final artifacts ==="
+          ls -lh "../${DRIVER_TARBALL}" source.tar.gz
+
+      - name: Upload source archive
         uses: actions/upload-artifact@v4
         with:
-          name: panvk-termux-aarch64-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}
-          path: |
-            termux-out-${{ matrix.build-type }}/
-            panvk-termux-aarch64-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}.tar.gz
+          name: panvk-source-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}
+          path: out-${{ matrix.build-type }}/source.tar.gz
+          if-no-files-found: error
+
+      - name: Upload driver archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: panvk-driver-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}
+          path: panvk-termux-aarch64-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}.tar.gz
           if-no-files-found: error
 
   release:
@@ -345,7 +369,7 @@ jobs:
           merge-multiple: true
 
       - name: List downloaded files
-        run: find artifacts -type f
+        run: find artifacts -type f -exec ls -lh {} \;
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -357,31 +381,33 @@ jobs:
 
             Source overlaid from
             `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci`.
-            All `*.patch` files in the repo root applied on top
-            (tolerant application).
+            All `*.patch` files in the repo root applied on top.
 
             **Date (UTC):** `${{ needs.prepare.outputs.date }}`
             **Time (UTC):** `${{ needs.prepare.outputs.time }}`
             **Commit:** `${{ github.sha }}`
             **Build types:** `${{ needs.prepare.outputs.types }}`
 
-            ### Files
-            - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
-            - `panvk-termux-aarch64-release-*.tar.gz`
-            - `libvulkan_panfrost.so`
-            - `panfrost_icd.aarch64.json`
-            - `source.tar.gz` -- full patched source tree
+            ### File layout
+
+            | File | Contents |
+            |------|----------|
+            | `panvk-termux-aarch64-<type>-<stamp>.tar.gz` | Driver only: `driver/lib/libvulkan_panfrost.so` + `driver/share/vulkan/icd.d/panfrost_icd.aarch64.json` |
+            | `source.tar.gz` | Patched Mesa source tree (per build type) |
 
             ### Install (Termux)
             ```bash
-            tar -xzf panvk-termux-aarch64-release-*.tar.gz -C $PREFIX
+            # driver
+            tar -xzf panvk-termux-aarch64-release-*.tar.gz
+            cp -r driver/lib/*          $PREFIX/lib/
+            cp -r driver/share/vulkan   $PREFIX/share/
+
+            # or use the files in-place:
             export VK_ICD_FILENAMES=$PREFIX/share/vulkan/icd.d/panfrost_icd.aarch64.json
             ```
           files: |
-            artifacts/*.tar.gz
-            artifacts/**/libvulkan_panfrost.so
-            artifacts/**/panfrost_icd.aarch64.json
-            artifacts/**/source.tar.gz
+            artifacts/panvk-termux-aarch64-*.tar.gz
+            artifacts/source.tar.gz
           overwrite_files: true
           generate_release_notes: true
           prerelease: true
