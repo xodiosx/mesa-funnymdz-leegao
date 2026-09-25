@@ -187,7 +187,7 @@ jobs:
                 libclc spirv-llvm-translator libxrandr libxrandr-static file \
                 patch
 
-              pip install --break-system-packages meson mako pyyaml packaging
+              pip install --break-system-packages meson mako pyyaml packaging setuptools
 
               cd "$TMPDIR"
               rm -rf mesa-panvk
