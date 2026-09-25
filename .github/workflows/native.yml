@@ -75,6 +75,87 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Write Meson command generator
+        run: |
+          mkdir -p "${{ github.workspace }}/ci-scripts"
+          cat > "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py" << 'PYEOF'
+          #!/usr/bin/env python3
+          """
+          Read meson.options, emit a `meson setup` shell command on stdout.
+          Handles multi-line option declarations that a single-line grep
+          would miss.
+          """
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          options_file = None
+          for name in ("meson.options", "meson_options.txt"):
+              f = Path(name)
+              if f.exists():
+                  options_file = f
+                  break
+
+          if options_file is None:
+              print("ERROR: no meson.options file found", file=sys.stderr)
+              sys.exit(1)
+
+          content = options_file.read_text()
+          opts = sorted(set(re.findall(r"['\"]([a-zA-Z0-9_-]+)['\"]", content)))
+
+          print(f">>> Options file: {options_file}", file=sys.stderr)
+          print(f">>> Options found: {' '.join(opts)}", file=sys.stderr)
+
+          build_type = os.environ.get("BUILD_TYPE", "debugoptimized")
+          prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+
+          args = [
+              f"-Dbuildtype={build_type}",
+              "-Dvulkan-drivers=panfrost",
+              "-Dgallium-drivers=",
+              "-Dplatforms=x11",
+              "-Dplatform-sdk-version=35",
+              "-Dglx=disabled",
+              "-Degl=disabled",
+              "-Dopengl=false",
+              "-Dgles1=disabled",
+              "-Dgles2=disabled",
+              "-Dbuild-tests=false",
+              "-Dlibunwind=disabled",
+              "-Dvalgrind=disabled",
+              "-Dperfetto=false",
+              f"-Dprefix={prefix}",
+              "-Dc_link_args=-landroid-shmem",
+              "-Dcpp_link_args=-landroid-shmem",
+          ]
+
+          if "panfrost-kmds" in opts:
+              args.append("-Dpanfrost-kmds=kbase,panthor")
+              print(">>> Adding: -Dpanfrost-kmds=kbase,panthor", file=sys.stderr)
+          else:
+              print(">>> WARNING: panfrost-kmds not in options file", file=sys.stderr)
+
+          if "panvk-use-kbase" in opts:
+              args.append("-Dpanvk-use-kbase=true")
+              print(">>> Adding: -Dpanvk-use-kbase=true", file=sys.stderr)
+          else:
+              print(">>> panvk-use-kbase not present (likely default)",
+                    file=sys.stderr)
+
+          if "panfrost-rust" in opts:
+              args.append("-Dpanfrost-rust=false")
+              print(">>> Adding: -Dpanfrost-rust=false", file=sys.stderr)
+
+          print("meson setup build-bionic \\")
+          for i, a in enumerate(args):
+              sep = "" if i == len(args) - 1 else " \\"
+              print(f"  {a}{sep}")
+          PYEOF
+          chmod +x "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py"
+          echo "--- wrote ci-scripts/gen_meson_cmd.py ---"
+          wc -l "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py"
+
       - name: Build PanVK (${{ matrix.build-type }}) inside Termux container
         run: |
           set -euo pipefail
@@ -84,6 +165,7 @@ jobs:
 
           docker run --rm \
             -v "${{ github.workspace }}/termux-out-${{ matrix.build-type }}:/termux-out" \
+            -v "${{ github.workspace }}/ci-scripts:/ci-scripts:ro" \
             termux/termux-docker:aarch64 \
             bash -c '
               set -euo pipefail
@@ -160,70 +242,14 @@ jobs:
                 exit 1
               fi
 
-              # ── Generate meson command via Python ──
               echo "=============================================="
               echo "Generating meson setup command ..."
               echo "=============================================="
-              python3 - <<'PYEOF' > /tmp/meson_cmd.sh
-          import re, sys
-          from pathlib import Path
-
-          options_file = None
-          for name in ("meson.options", "meson_options.txt"):
-              f = Path(name)
-              if f.exists():
-                  options_file = f
-                  break
-
-          if options_file is None:
-              print("echo \"ERROR: no meson.options file\" >&2; exit 1")
-              sys.exit(0)
-
-          content = options_file.read_text()
-          opts = sorted(set(re.findall(r"['\"]([a-zA-Z0-9_-]+)['\"]", content)))
-
-          print(f">>> Options file: {options_file}", file=sys.stderr)
-          print(f">>> Options found: {' '.join(opts)}", file=sys.stderr)
-
-          args = [
-              "-Dbuildtype=$BUILD_TYPE",
-              "-Dvulkan-drivers=panfrost",
-              "-Dgallium-drivers=",
-              "-Dplatforms=x11",
-              "-Dplatform-sdk-version=35",
-              "-Dglx=disabled",
-              "-Degl=disabled",
-              "-Dopengl=false",
-              "-Dgles1=disabled",
-              "-Dgles2=disabled",
-              "-Dbuild-tests=false",
-              "-Dlibunwind=disabled",
-              "-Dvalgrind=disabled",
-              "-Dperfetto=false",
-              "-Dprefix=$PREFIX",
-              "-Dc_link_args=-landroid-shmem",
-              "-Dcpp_link_args=-landroid-shmem",
-          ]
-
-          # Enable both kbase and panthor
-          if "panfrost-kmds" in opts:
-              args.append("-Dpanfrost-kmds=kbase,panthor")
-              print(">>> Adding: -Dpanfrost-kmds=kbase,panthor", file=sys.stderr)
-          else:
-              print(">>> WARNING: panfrost-kmds not in options file", file=sys.stderr)
-
-          if "panvk-use-kbase" in opts:
-              args.append("-Dpanvk-use-kbase=true")
-              print(">>> Adding: -Dpanvk-use-kbase=true", file=sys.stderr)
-
-          if "panfrost-rust" in opts:
-              args.append("-Dpanfrost-rust=false")
-
-          print("meson setup build-bionic \\")
-          for i, a in enumerate(args):
-              sep = "" if i == len(args) - 1 else " \\"
-              print(f"  {a}{sep}")
-          PYEOF
+              if [[ ! -f /ci-scripts/gen_meson_cmd.py ]]; then
+                echo "ERROR: /ci-scripts/gen_meson_cmd.py not mounted" >&2
+                exit 1
+              fi
+              python3 /ci-scripts/gen_meson_cmd.py > /tmp/meson_cmd.sh
 
               echo "=== Generated meson command ==="
               cat /tmp/meson_cmd.sh
@@ -233,8 +259,10 @@ jobs:
               echo "=============================================="
               echo "Verifying kmds in build graph ..."
               echo "=============================================="
-              grep -c "kbase_kmod.c.o" build-bionic/build.ninja || true
-              grep -c "panthor_kmod.c.o" build-bionic/build.ninja || true
+              KBASE_COUNT=$(grep -c "kbase_kmod.c.o" build-bionic/build.ninja || true)
+              PANTHOR_COUNT=$(grep -c "panthor_kmod.c.o" build-bionic/build.ninja || true)
+              echo "kbase_kmod.c.o entries:   $KBASE_COUNT"
+              echo "panthor_kmod.c.o entries: $PANTHOR_COUNT"
 
               ninja -C build-bionic -j$(nproc) \
                 src/panfrost/vulkan/libvulkan_panfrost.so
