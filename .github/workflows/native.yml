@@ -65,7 +65,7 @@ jobs:
   build:
     needs: prepare
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -157,64 +157,84 @@ jobs:
                 echo ">>> PASS: exec_init_failed field and shader fallback are in the tree"
               else
                 echo ">>> FAIL: critical patch content missing; cannot build" >&2
-                grep -n "exec_init_failed" src/panfrost/lib/kmod/pan_kmod.h   || echo "missing in pan_kmod.h"
-                grep -n "exec_init_failed" src/panfrost/lib/kmod/kbase_kmod.c || echo "missing in kbase_kmod.c"
-                grep -n "mempools.rw"      src/panfrost/vulkan/panvk_vX_shader.c || echo "missing in panvk_vX_shader.c"
                 exit 1
               fi
 
-              # ── Probe available Meson options ──
+              # ── Generate meson command via Python ──
               echo "=============================================="
-              echo "Probing available Meson options ..."
+              echo "Generating meson setup command ..."
               echo "=============================================="
-              OPTIONS_FILE="meson.options"
-              [[ -f "$OPTIONS_FILE" ]] || OPTIONS_FILE="meson_options.txt"
-              echo "Options file: $OPTIONS_FILE"
-              grep -oE "option\([^a-zA-Z0-9_-]+[a-z0-9_-]+" "$OPTIONS_FILE" \
-                | sed -E "s/option\([^a-zA-Z0-9_-]+//" | sort -u | tr "\n" " " || true
-              echo
+              python3 - <<'PYEOF' > /tmp/meson_cmd.sh
+          import re, sys
+          from pathlib import Path
 
-              has_option() {
-                grep -qE "option\([^a-zA-Z0-9_-]+$1[^a-zA-Z0-9_-]" "$OPTIONS_FILE"
-              }
+          options_file = None
+          for name in ("meson.options", "meson_options.txt"):
+              f = Path(name)
+              if f.exists():
+                  options_file = f
+                  break
 
-              MESON_ARGS=(
-                "-Dbuildtype=$BUILD_TYPE"
-                "-Dvulkan-drivers=panfrost"
-                "-Dgallium-drivers="
-                "-Dplatforms=x11"
-                "-Dglx=disabled"
-                "-Degl=disabled"
-                "-Dopengl=false"
-                "-Dgles1=disabled"
-                "-Dgles2=disabled"
-                "-Dbuild-tests=false"
-                "-Dlibunwind=disabled"
-                "-Dvalgrind=disabled"
-                "-Dperfetto=false"
-                "-Dprefix=$PREFIX"
-                "-Dc_link_args=-landroid-shmem"
-                "-Dcpp_link_args=-landroid-shmem"
-              )
+          if options_file is None:
+              print("echo \"ERROR: no meson.options file\" >&2; exit 1")
+              sys.exit(0)
 
-              if has_option "panfrost-kmds"; then
-                MESON_ARGS+=("-Dpanfrost-kmds=kbase")
-                echo ">>> panfrost-kmds supported; adding kbase,panthor"
-              fi
-              if has_option "panvk-use-kbase"; then
-                MESON_ARGS+=("-Dpanvk-use-kbase=true")
-                echo ">>> panvk-use-kbase supported; enabling"
-              else
-                echo ">>> panvk-use-kbase not present in this repo (likely default)"
-              fi
-              if has_option "panfrost-rust"; then
-                MESON_ARGS+=("-Dpanfrost-rust=false")
-              fi
+          content = options_file.read_text()
+          opts = sorted(set(re.findall(r"['\"]([a-zA-Z0-9_-]+)['\"]", content)))
+
+          print(f">>> Options file: {options_file}", file=sys.stderr)
+          print(f">>> Options found: {' '.join(opts)}", file=sys.stderr)
+
+          args = [
+              "-Dbuildtype=$BUILD_TYPE",
+              "-Dvulkan-drivers=panfrost",
+              "-Dgallium-drivers=",
+              "-Dplatforms=x11",
+              "-Dplatform-sdk-version=35",
+              "-Dglx=disabled",
+              "-Degl=disabled",
+              "-Dopengl=false",
+              "-Dgles1=disabled",
+              "-Dgles2=disabled",
+              "-Dbuild-tests=false",
+              "-Dlibunwind=disabled",
+              "-Dvalgrind=disabled",
+              "-Dperfetto=false",
+              "-Dprefix=$PREFIX",
+              "-Dc_link_args=-landroid-shmem",
+              "-Dcpp_link_args=-landroid-shmem",
+          ]
+
+          # Enable both kbase and panthor
+          if "panfrost-kmds" in opts:
+              args.append("-Dpanfrost-kmds=kbase,panthor")
+              print(">>> Adding: -Dpanfrost-kmds=kbase,panthor", file=sys.stderr)
+          else:
+              print(">>> WARNING: panfrost-kmds not in options file", file=sys.stderr)
+
+          if "panvk-use-kbase" in opts:
+              args.append("-Dpanvk-use-kbase=true")
+              print(">>> Adding: -Dpanvk-use-kbase=true", file=sys.stderr)
+
+          if "panfrost-rust" in opts:
+              args.append("-Dpanfrost-rust=false")
+
+          print("meson setup build-bionic \\")
+          for i, a in enumerate(args):
+              sep = "" if i == len(args) - 1 else " \\"
+              print(f"  {a}{sep}")
+          PYEOF
+
+              echo "=== Generated meson command ==="
+              cat /tmp/meson_cmd.sh
+              echo "=== Running meson setup ==="
+              bash /tmp/meson_cmd.sh
 
               echo "=============================================="
-              echo "meson setup with: ${MESON_ARGS[*]}"
+              echo "Verifying kmds in build graph ..."
               echo "=============================================="
-              meson setup build-bionic "${MESON_ARGS[@]}"
+              grep -c "kbase_kmod.c.o" build-bionic/build.ninja || true
+              grep -c "panthor_kmod.c.o" build-bionic/build.ninja || true
 
               ninja -C build-bionic -j$(nproc) \
                 src/panfrost/vulkan/libvulkan_panfrost.so
@@ -283,7 +303,8 @@ jobs:
             ## PanVK for Termux (aarch64, native build)
 
             Built natively inside Termux (`termux/termux-docker:aarch64`)
-            on `ubuntu-24.04-arm`.
+            on `ubuntu-24.04-arm`. Supports Mali-G57 (arch 9, JM/kbase)
+            **and** Valhall v10+ (CSF/panthor).
 
             **Source:** `xodiosx/mesa-funnymdz-leegao`
             **Build date (UTC):** `${{ needs.prepare.outputs.date }}`
@@ -292,11 +313,11 @@ jobs:
             **Build types:** `${{ needs.prepare.outputs.types }}`
 
             ### Build customizations
-            - `panvk-mali-g57-workaround.patch` applied from repo root
-              (tolerant application; critical hunks verified in-tree).
-            - Includes `exec_init_failed` fallback for Mali-G57 (arch 9, JM).
-            - Meson options are probed at configure time so the workflow
-              adapts to whichever options the repo actually exposes.
+            - `panvk-mali-g57-workaround.patch` applied from repo root.
+            - `exec_init_failed` fallback for Mali-G57 (arch 9, JM).
+            - `panfrost-kmds=kbase,panthor` — both backends compiled.
+            - `platform-sdk-version=35` — exposes `sync_merge`/`sync_wait`
+              prototypes for the panthor backend.
 
             ### Files
             - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
