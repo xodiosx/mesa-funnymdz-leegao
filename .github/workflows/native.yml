@@ -80,14 +80,6 @@ jobs:
           mkdir -p "${{ github.workspace }}/ci-scripts"
           cat > "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py" << 'PYEOF'
           #!/usr/bin/env python3
-          """
-          Read meson.options, emit a `meson setup` shell command on stdout.
-
-          PanVK-only build: mesa-clc is set to 'auto' so Meson skips
-          building CLC unless something actually requires it. Since
-          Vulkan-only, it won't, and the SPIRV-Tools PR #5534 feature
-          check is never run.
-          """
           import os
           import re
           import sys
@@ -135,8 +127,6 @@ jobs:
               "-Dcpp_link_args=-landroid-shmem",
           ]
 
-          # mesa-clc accepts: enabled | system | auto.
-          # 'auto' skips CLC when nothing needs it (PanVK doesn't).
           if "mesa-clc" in opts:
               args.append("-Dmesa-clc=auto")
               print(">>> Adding: -Dmesa-clc=auto", file=sys.stderr)
@@ -147,11 +137,9 @@ jobs:
 
           if "gallium-clover" in opts:
               args.append("-Dgallium-clover=false")
-              print(">>> Adding: -Dgallium-clover=false", file=sys.stderr)
 
           if "gallium-rusticl" in opts:
               args.append("-Dgallium-rusticl=false")
-              print(">>> Adding: -Dgallium-rusticl=false", file=sys.stderr)
 
           if "panfrost-kmds" in opts:
               args.append("-Dpanfrost-kmds=kbase,panthor")
@@ -278,6 +266,38 @@ jobs:
                 echo ">>> No panvk-mali-g57-workaround.patch in tree"
               fi
 
+              # ══════════════════════════════════════════════════════
+              # CLC FIX: remove with_panfrost_vk from with_driver_using_cl.
+              #
+              # The fork lists panvk in with_driver_using_cl, which forces
+              # with_clc = true for a panvk-only build. That drags in
+              # src/compiler/clc/meson.build, which then aborts on the
+              # SPIRV-Tools PR #5534 feature check (the Termux spirv-tools
+              # package doesn't ship SetAllowPtrTypeMismatch).
+              #
+              # PanVK does not use CLC. Removing the token makes with_clc
+              # false so the CLC subdir is never entered.
+              #
+              # This has to run AFTER the winlatormali-ci overlay because
+              # the overlay restores the unmodified meson.build.
+              # ══════════════════════════════════════════════════════
+              echo "=============================================="
+              echo "Fixing with_driver_using_cl (remove panvk) ..."
+              echo "=============================================="
+              echo "--- before ---"
+              grep -n "with_panfrost_vk" meson.build || true
+              sed -i \
+                "s|with_gallium_panfrost, with_panfrost_vk,|with_gallium_panfrost,|" \
+                meson.build
+              sed -i "s|with_panfrost_vk,||g" meson.build
+              echo "--- after ---"
+              grep -n "with_panfrost_vk\|with_driver_using_cl" meson.build || true
+              if grep -q "with_panfrost_vk" meson.build; then
+                echo ">>> WARNING: with_panfrost_vk still present in meson.build"
+              else
+                echo ">>> PASS: with_panfrost_vk removed from meson.build"
+              fi
+
               echo "--- reject files ---"
               find . -name "*.rej" -print || true
 
@@ -379,8 +399,8 @@ jobs:
             ## PanVK for Termux (aarch64, native build)
 
             Built natively inside Termux. Source merged with
-            `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci` for Mali-G57
-            fixes, then `panvk-mali-g57-workaround.patch` applied on top.
+            `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci`, then
+            `panvk-mali-g57-workaround.patch` applied on top.
 
             **Date (UTC):** `${{ needs.prepare.outputs.date }}`
             **Time (UTC):** `${{ needs.prepare.outputs.time }}`
@@ -394,7 +414,9 @@ jobs:
             - `panfrost-kmds=kbase,panthor` — both backends compiled.
             - `platform-sdk-version=35` + `-D__ANDROID_API__=35` — exposes
               Bionic's `sync_merge` / `sync_wait` for panthor.
-            - `mesa-clc=auto` — CLC skipped since nothing needs it.
+            - `with_panfrost_vk` removed from `with_driver_using_cl` — skips
+              the CLC subdir (which would otherwise fail the SPIRV-Tools
+              PR #5534 feature check).
 
             ### Files
             - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
