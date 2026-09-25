@@ -75,9 +75,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Write Meson command generator
+      - name: Write helper scripts
         run: |
           mkdir -p "${{ github.workspace }}/ci-scripts"
+
           cat > "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py" << 'PYEOF'
           #!/usr/bin/env python3
           import os
@@ -129,26 +130,17 @@ jobs:
 
           if "mesa-clc" in opts:
               args.append("-Dmesa-clc=auto")
-              print(">>> Adding: -Dmesa-clc=auto", file=sys.stderr)
-
           if "install-mesa-clc" in opts:
               args.append("-Dinstall-mesa-clc=false")
-              print(">>> Adding: -Dinstall-mesa-clc=false", file=sys.stderr)
-
           if "gallium-clover" in opts:
               args.append("-Dgallium-clover=false")
-
           if "gallium-rusticl" in opts:
               args.append("-Dgallium-rusticl=false")
-
           if "panfrost-kmds" in opts:
               args.append("-Dpanfrost-kmds=kbase,panthor")
               print(">>> Adding: -Dpanfrost-kmds=kbase,panthor", file=sys.stderr)
-
           if "panvk-use-kbase" in opts:
               args.append("-Dpanvk-use-kbase=true")
-              print(">>> Adding: -Dpanvk-use-kbase=true", file=sys.stderr)
-
           if "panfrost-rust" in opts:
               args.append("-Dpanfrost-rust=false")
 
@@ -158,6 +150,58 @@ jobs:
               print(f"  {a}{sep}")
           PYEOF
           chmod +x "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py"
+
+          cat > "${{ github.workspace }}/ci-scripts/fix_meson_fallbacks.py" << 'PYEOF'
+          #!/usr/bin/env python3
+          """
+          When with_clc is false, the CLC subdir is not entered and the
+          variable prog_mesa_clc is never defined. Some subdirectories
+          (e.g. src/panfrost/libpan/meson.build) reference it
+          unconditionally, which fails with:
+
+              ERROR: Unknown variable name "prog_mesa_clc"
+
+          Fix: insert a fallback definition right after the with_clc
+          assignment so the variable is always defined. An empty array is
+          a valid no-op when concatenated into a sources list.
+          """
+          import re
+          import sys
+          from pathlib import Path
+
+          p = Path("meson.build")
+          if not p.exists():
+              print("ERROR: meson.build not found", file=sys.stderr)
+              sys.exit(1)
+
+          s = p.read_text()
+
+          if "prog_mesa_clc = []" in s:
+              print(">>> prog_mesa_clc fallback already present")
+              sys.exit(0)
+
+          m = re.search(r"^with_clc\s*=\s*[^\n]*\n", s, flags=re.MULTILINE)
+          if not m:
+              print("WARNING: 'with_clc = ...' line not found in meson.build",
+                    file=sys.stderr)
+              sys.exit(0)
+
+          fallback = (
+              "\n# PanVK-only build: CLC is disabled, but some subdirs still\n"
+              "# reference prog_mesa_clc. Provide an empty no-op fallback.\n"
+              "if not with_clc\n"
+              "  prog_mesa_clc = []\n"
+              "endif\n"
+          )
+
+          s = s[:m.end()] + fallback + s[m.end():]
+          p.write_text(s)
+          print(">>> inserted prog_mesa_clc = [] fallback after with_clc")
+          PYEOF
+          chmod +x "${{ github.workspace }}/ci-scripts/fix_meson_fallbacks.py"
+
+          echo "--- wrote helper scripts ---"
+          ls -la "${{ github.workspace }}/ci-scripts/"
 
       - name: Build PanVK (${{ matrix.build-type }}) inside Termux container
         run: |
@@ -263,14 +307,8 @@ jobs:
                 echo ">>> No panvk-mali-g57-workaround.patch in tree"
               fi
 
-              # Remove with_panfrost_vk from with_driver_using_cl so that
-              # with_clc stays false. If CLC is entered, it aborts on the
-              # SPIRV-Tools PR 5534 feature check, which the Termux
-              # spirv-tools package does not provide.
-              # Must run AFTER the overlay because the overlay restores
-              # the unmodified meson.build.
               echo "=============================================="
-              echo "Fixing with_driver_using_cl (remove panvk) ..."
+              echo "Removing with_panfrost_vk from with_driver_using_cl ..."
               echo "=============================================="
               echo "--- before ---"
               grep -n "with_panfrost_vk" meson.build || true
@@ -283,8 +321,16 @@ jobs:
               if grep -q "with_panfrost_vk" meson.build; then
                 echo ">>> WARNING: with_panfrost_vk still present in meson.build"
               else
-                echo ">>> PASS: with_panfrost_vk removed from meson.build"
+                echo ">>> PASS: with_panfrost_vk removed"
               fi
+
+              echo "=============================================="
+              echo "Inserting prog_mesa_clc fallback ..."
+              echo "=============================================="
+              python3 /ci-scripts/fix_meson_fallbacks.py
+
+              echo "--- verify fallback ---"
+              grep -n -A2 "if not with_clc" meson.build || true
 
               echo "--- reject files ---"
               find . -name "*.rej" -print || true
@@ -381,7 +427,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
-          name: "${{ needs.prepare.outputs.tag }} — PanVK build ${{ needs.prepare.outputs.date }} ${{ needs.prepare.outputs.time }} UTC"
+          name: "${{ needs.prepare.outputs.tag }} -- PanVK build ${{ needs.prepare.outputs.date }} ${{ needs.prepare.outputs.time }} UTC"
           body: |
             ## PanVK for Termux (aarch64, native build)
 
@@ -399,11 +445,10 @@ jobs:
             - `panvk-mali-g57-workaround.patch` applied on top.
             - `exec_init_failed` fallback for Mali-G57 (arch 9, JM).
             - `panfrost-kmds=kbase,panthor` -- both backends compiled.
-            - `platform-sdk-version=35` plus `-D__ANDROID_API__=35` to
-              expose Bionic sync_merge / sync_wait for the panthor backend.
-            - `with_panfrost_vk` removed from `with_driver_using_cl` so the
-              CLC subdir is skipped and the SPIRV-Tools PR 5534 check does
-              not run.
+            - `platform-sdk-version=35` plus `-D__ANDROID_API__=35`.
+            - `with_panfrost_vk` removed from `with_driver_using_cl`.
+            - `prog_mesa_clc = []` fallback inserted so subdirs that
+              reference it do not fail when CLC is disabled.
 
             ### Files
             - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
