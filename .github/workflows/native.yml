@@ -81,11 +81,12 @@ jobs:
           cat > "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py" << 'PYEOF'
           #!/usr/bin/env python3
           """
-          Read meson.options, emit a `meson setup` shell command on stdout.
+          Emit a `meson setup` command with options that exist in the repo.
 
-          PanVK-only build: CLC (OpenCL C compiler) is explicitly disabled
-          because it requires a SPIRV-Tools feature (PR #5534) that the
-          Termux spirv-tools package does not ship. PanVK does not need CLC.
+          No platform-sdk-version or __ANDROID_API__ here: the Mexicanbr
+          meson.build handles Android API detection internally, and no
+          CLC-disabling options because the Mexicanbr meson.build does not
+          put with_panfrost_vk in with_driver_using_cl.
           """
           import os
           import re
@@ -131,22 +132,6 @@ jobs:
               "-Dcpp_link_args=-landroid-shmem",
           ]
 
-          # Disable CLC / OpenCL C compiler: not needed for PanVK, and it
-          # requires a SPIRV-Tools feature the Termux package lacks.
-          if "mesa-clc" in opts:
-              #args.append("-Dmesa-clc=disabled")
-              print(">>> Adding: -Dmesa-clc=disabled", file=sys.stderr)
-          if "install-mesa-clc" in opts:
-              #args.append("-Dinstall-mesa-clc=false")
-              print(">>> Adding: -Dinstall-mesa-clc=false", file=sys.stderr)
-          if "microsoft-clc" in opts:
-              #args.append("-Dmicrosoft-clc=disabled")
-              print(">>> Adding: -Dmicrosoft-clc=disabled", file=sys.stderr)
-          if "gallium-clover" in opts:
-              #args.append("-Dgallium-clover=false")
-          if "gallium-rusticl" in opts:
-              args.append("-Dgallium-rusticl=false")
-
           if "panfrost-kmds" in opts:
               args.append("-Dpanfrost-kmds=kbase,panthor")
               print(">>> Adding: -Dpanfrost-kmds=kbase,panthor", file=sys.stderr)
@@ -154,9 +139,6 @@ jobs:
           if "panvk-use-kbase" in opts:
               args.append("-Dpanvk-use-kbase=true")
               print(">>> Adding: -Dpanvk-use-kbase=true", file=sys.stderr)
-
-          if "panfrost-rust" in opts:
-              args.append("-Dpanfrost-rust=false")
 
           print("meson setup build-bionic \\")
           for i, a in enumerate(args):
@@ -212,7 +194,6 @@ jobs:
               git clone --depth 1 https://github.com/xodiosx/mesa-funnymdz-leegao.git mesa-panvk
               cd mesa-panvk
 
-              # ── Fetch winlatormali-ci reference tree (under $TMPDIR, not /tmp) ──
               echo "=============================================="
               echo "Fetching winlatormali-ci reference tree ..."
               echo "=============================================="
@@ -223,46 +204,71 @@ jobs:
                 https://github.com/mexicanbr0auth/mesa-panvk-g57.git \
                 "$REF_DIR"
 
-              # ── Diff against our tree ──
               echo "=============================================="
-              echo "Files that differ from winlatormali-ci ..."
+              echo "Overlaying winlatormali-ci (full tree) ..."
               echo "=============================================="
-              diff -rq --exclude=".git" \
-                --exclude="build-bionic" \
-                --exclude="build-host" \
-                "$REF_DIR" . 2>/dev/null \
-                | grep -v "^Only in $REF_DIR" \
-                | tee "$TMPDIR/diff-summary.txt" || true
-
-              echo "=============================================="
-              echo "Files only present in winlatormali-ci ..."
-              echo "=============================================="
-              diff -rq --exclude=".git" \
-                --exclude="build-bionic" \
-                --exclude="build-host" \
-                "$REF_DIR" . 2>/dev/null \
-                | grep "^Only in $REF_DIR" \
-                | tee "$TMPDIR/diff-only-ref.txt" || true
-
-              # ── Overlay differing files from the reference tree ──
-              echo "=============================================="
-              echo "Overlaying winlatormali-ci files ..."
-              echo "=============================================="
-              if [[ -d "$REF_DIR/src" ]]; then
-                cp -a "$REF_DIR/src/." src/ 2>/dev/null || true
-              fi
-              for f in meson.build meson.options meson_options.txt VERSION; do
-                if [[ -f "$REF_DIR/$f" ]]; then
-                  cp -a "$REF_DIR/$f" "./$f" 2>/dev/null || true
-                fi
+              # Copy every file from the reference except .git, build dirs,
+              # and subprojects. Includes meson.build, meson.options, and
+              # all of src/. This is what brings in the Mexicanbr fixes
+              # for Android API auto-detection and CLC avoidance.
+              (
+                cd "$REF_DIR"
+                find . -type f \
+                  -not -path "./.git/*" \
+                  -not -path "./.github/*" \
+                  -not -path "./build*/*" \
+                  -not -path "./subprojects/*" \
+                  -print
+              ) | while read -r f; do
+                rel="${f#./}"
+                mkdir -p "$(dirname "$rel")"
+                cp -a "$REF_DIR/$rel" "$rel"
               done
               echo "Overlay done."
 
+              # Show what the Mexicanbr meson.build does for Android/CLC
+              echo "--- winlatormali-ci meson.build: Android/CLC related lines ---"
+              grep -n "with_clc\|with_panfrost_vk\|platform-sdk-version\|__ANDROID_API__\|ANDROID_API_LEVEL" \
+                meson.build || true
+              echo "--- end ---"
+
               # ── Apply our own patch on top ──
+              # panvk-mali-g57-workaround.patch adds the exec_init_failed
+              # fallback for Mali-G57 (arch 9, JM). If Mexicanbr already
+              # contains those changes, git apply --check fails and the
+              # patch(1) fallback skips the already-applied hunks.
               echo "=============================================="
               echo "Applying panvk-mali-g57-workaround.patch ..."
               echo "=============================================="
+              if [[ -f panvk-mali-g57-workaround.patch ]]; then
+                if git apply --check panvk-mali-g57-workaround.patch 2>/dev/null; then
+                  echo ">>> clean apply"
+                  git apply --verbose panvk-mali-g57-workaround.patch
+                else
+                  echo ">>> git apply --check failed; using patch(1) forward"
+                  patch -p1 --forward --no-backup-if-mismatch \
+                    < panvk-mali-g57-workaround.patch || true
+                fi
+              else
+                echo ">>> No panvk-mali-g57-workaround.patch in tree"
+              fi
 
+              echo "--- reject files ---"
+              find . -name "*.rej" -print || true
+
+              # Sanity check is informational only
+              echo "=============================================="
+              echo "Sanity: exec_init_failed / shader fallback present? ..."
+              echo "=============================================="
+              grep -q "exec_init_failed" src/panfrost/lib/kmod/pan_kmod.h \
+                && echo "  pan_kmod.h:         present" \
+                || echo "  pan_kmod.h:         MISSING"
+              grep -q "exec_init_failed" src/panfrost/lib/kmod/kbase_kmod.c \
+                && echo "  kbase_kmod.c:       present" \
+                || echo "  kbase_kmod.c:       MISSING"
+              grep -q "mempools.rw" src/panfrost/vulkan/panvk_vX_shader.c \
+                && echo "  panvk_vX_shader.c:  present" \
+                || echo "  panvk_vX_shader.c:  MISSING"
 
               # ── Generate meson command ──
               MESON_SH="$TMPDIR/meson_cmd.sh"
@@ -271,7 +277,7 @@ jobs:
               cat "$MESON_SH"
               bash "$MESON_SH"
 
-              # ── Archive source (before building, so it is clean) ──
+              # ── Archive source (before building) ──
               echo "=============================================="
               echo "Archiving source tree ..."
               echo "=============================================="
@@ -285,11 +291,6 @@ jobs:
               cd mesa-panvk
 
               # ── Build ──
-              KBASE_COUNT=$(grep -c "kbase_kmod.c.o" build-bionic/build.ninja || true)
-              PANTHOR_COUNT=$(grep -c "panthor_kmod.c.o" build-bionic/build.ninja || true)
-              echo "kbase_kmod.c.o entries:   $KBASE_COUNT"
-              echo "panthor_kmod.c.o entries: $PANTHOR_COUNT"
-
               ninja -C build-bionic -j$(nproc) \
                 src/panfrost/vulkan/libvulkan_panfrost.so
 
@@ -350,36 +351,27 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
-          name: "${{ needs.prepare.outputs.tag }} — PanVK build ${{ needs.prepare.outputs.date }} ${{ needs.prepare.outputs.time }} UTC"
+          name: "${{ needs.prepare.outputs.tag }} -- PanVK build ${{ needs.prepare.outputs.date }} ${{ needs.prepare.outputs.time }} UTC"
           body: |
             ## PanVK for Termux (aarch64, native build)
 
-            Built natively inside Termux. Source merged with
-            `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci` for Mali-G57
-            fixes, then `panvk-mali-g57-workaround.patch` applied on top.
+            Source tree fully overlaid from
+            `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci` (including
+            its `meson.build`, which auto-detects Android API level and
+            skips CLC). `panvk-mali-g57-workaround.patch` applied on top
+            for any missing fallbacks.
 
             **Date (UTC):** `${{ needs.prepare.outputs.date }}`
             **Time (UTC):** `${{ needs.prepare.outputs.time }}`
             **Commit:** `${{ github.sha }}`
             **Build types:** `${{ needs.prepare.outputs.types }}`
 
-            ### Build customizations
-            - `mexicanbr/mesa-panvk-g57@winlatormali-ci` overlaid
-              onto the base tree (Mali-G57 fixes).
-            - `panvk-mali-g57-workaround.patch` applied on top.
-            - `exec_init_failed` fallback for Mali-G57 (arch 9, JM).
-            - `panfrost-kmds=kbase,panthor` — both backends compiled.
-            - `platform-sdk-version=35` + `-D__ANDROID_API__=35` — exposes
-              Bionic's `sync_merge` / `sync_wait` for the panthor backend.
-            - CLC/OpenCL C compiler disabled (PanVK does not need it; the
-              Termux SPIRV-Tools package lacks a required upstream feature).
-
             ### Files
             - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
             - `panvk-termux-aarch64-release-*.tar.gz`
             - `libvulkan_panfrost.so`
             - `panfrost_icd.aarch64.json`
-            - `source.tar.gz` — full patched source tree
+            - `source.tar.gz` -- full patched source tree
 
             ### Install (Termux)
             ```bash
