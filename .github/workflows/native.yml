@@ -198,7 +198,7 @@ jobs:
               )
 
               if has_option "panfrost-kmds"; then
-                MESON_ARGS+=("-Dpanfrost-kmds=kbase,panthor")
+                MESON_ARGS+=("-Dpanfrost-kmds=kbase")
                 echo ">>> panfrost-kmds supported; adding kbase,panthor"
               fi
               if has_option "panvk-use-kbase"; then
