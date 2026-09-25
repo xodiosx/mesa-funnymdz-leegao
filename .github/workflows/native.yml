@@ -127,8 +127,6 @@ jobs:
               "-Dvalgrind=disabled",
               "-Dperfetto=false",
               f"-Dprefix={prefix}",
-              "-Dc_args=-D__ANDROID_API__=35",
-              "-Dcpp_args=-D__ANDROID_API__=35",
               "-Dc_link_args=-landroid-shmem",
               "-Dcpp_link_args=-landroid-shmem",
           ]
@@ -136,16 +134,16 @@ jobs:
           # Disable CLC / OpenCL C compiler: not needed for PanVK, and it
           # requires a SPIRV-Tools feature the Termux package lacks.
           if "mesa-clc" in opts:
-              args.append("-Dmesa-clc=disabled")
+              #args.append("-Dmesa-clc=disabled")
               print(">>> Adding: -Dmesa-clc=disabled", file=sys.stderr)
           if "install-mesa-clc" in opts:
-              args.append("-Dinstall-mesa-clc=false")
+              #args.append("-Dinstall-mesa-clc=false")
               print(">>> Adding: -Dinstall-mesa-clc=false", file=sys.stderr)
           if "microsoft-clc" in opts:
-              args.append("-Dmicrosoft-clc=disabled")
+              #args.append("-Dmicrosoft-clc=disabled")
               print(">>> Adding: -Dmicrosoft-clc=disabled", file=sys.stderr)
           if "gallium-clover" in opts:
-              args.append("-Dgallium-clover=false")
+              #args.append("-Dgallium-clover=false")
           if "gallium-rusticl" in opts:
               args.append("-Dgallium-rusticl=false")
 
