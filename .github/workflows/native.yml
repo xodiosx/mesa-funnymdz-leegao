@@ -113,7 +113,7 @@ jobs:
               f"-Dbuildtype={build_type}",
               "-Dvulkan-drivers=panfrost",
               "-Dgallium-drivers=",
-              "-Dplatforms=x11",
+              "-Dplatforms=android,x11",
               "-Dglx=disabled",
               "-Degl=disabled",
               "-Dopengl=false",
@@ -180,7 +180,7 @@ jobs:
                 vulkan-loader-generic libandroid-shmem libdrm libxcb \
                 xorgproto libx11 libxshmfence zlib zstd libexpat \
                 libclc spirv-llvm-translator libxrandr libxrandr-static file \
-                patch
+                patch ndk-sysroot libandroid-stub*
 
               pip install --break-system-packages \
                 meson mako pyyaml packaging ply setuptools
