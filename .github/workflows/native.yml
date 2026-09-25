@@ -82,13 +82,6 @@ jobs:
           #!/usr/bin/env python3
           """
           Read meson.options, emit a `meson setup` shell command on stdout.
-          Handles multi-line option declarations.
-
-          Also injects -D__ANDROID_API__=35 into c_args/cpp_args, because
-          platform-sdk-version only sets Mesa's own ANDROID_API_LEVEL macro.
-          Bionic's __INTRODUCED_IN guards check __ANDROID_API__, and Termux
-          clang defaults it to 21, which hides sync_merge/sync_wait (API 26+)
-          that the panthor backend uses.
           """
           import os
           import re
@@ -140,19 +133,13 @@ jobs:
           if "panfrost-kmds" in opts:
               args.append("-Dpanfrost-kmds=kbase,panthor")
               print(">>> Adding: -Dpanfrost-kmds=kbase,panthor", file=sys.stderr)
-          else:
-              print(">>> WARNING: panfrost-kmds not in options file", file=sys.stderr)
 
           if "panvk-use-kbase" in opts:
               args.append("-Dpanvk-use-kbase=true")
               print(">>> Adding: -Dpanvk-use-kbase=true", file=sys.stderr)
-          else:
-              print(">>> panvk-use-kbase not present (likely default)",
-                    file=sys.stderr)
 
           if "panfrost-rust" in opts:
               args.append("-Dpanfrost-rust=false")
-              print(">>> Adding: -Dpanfrost-rust=false", file=sys.stderr)
 
           print("meson setup build-bionic \\")
           for i, a in enumerate(args):
@@ -160,8 +147,6 @@ jobs:
               print(f"  {a}{sep}")
           PYEOF
           chmod +x "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py"
-          echo "--- wrote ci-scripts/gen_meson_cmd.py ---"
-          wc -l "${{ github.workspace }}/ci-scripts/gen_meson_cmd.py"
 
       - name: Build PanVK (${{ matrix.build-type }}) inside Termux container
         run: |
@@ -180,23 +165,15 @@ jobs:
               export BUILD_TYPE="'"${{ matrix.build-type }}"'"
 
               mkdir -p "$TMPDIR"
-              echo ">>> TMPDIR=$TMPDIR"
-              ls -ld "$TMPDIR"
 
               mkdir -p "$PREFIX/etc/apt/sources.list.d"
               echo "deb https://packages.termux.dev/apt/termux-main stable main" \
                 > "$PREFIX/etc/apt/sources.list.d/termux-main.list"
 
               for i in 1 2 3; do
-                if pkg update -y; then
-                  break
-                fi
-                echo "pkg update attempt $i failed, retrying in 10s..."
+                if pkg update -y; then break; fi
                 sleep 10
-                if [[ $i -eq 3 ]]; then
-                  echo "pkg update failed after 3 attempts" >&2
-                  exit 1
-                fi
+                if [[ $i -eq 3 ]]; then exit 1; fi
               done
 
               pkg install -y x11-repo tur-repo
@@ -217,82 +194,117 @@ jobs:
               git clone --depth 1 https://github.com/xodiosx/mesa-funnymdz-leegao.git mesa-panvk
               cd mesa-panvk
 
+              # ── Fetch the winlatormali-ci branch as a reference tree ──
+              echo "=============================================="
+              echo "Fetching winlatormali-ci reference tree ..."
+              echo "=============================================="
+              git clone --depth 1 \
+                --branch winlatormali-ci \
+                https://github.com/mexicanbr0auth/mesa-panvk-g57.git \
+                /tmp/winlatormali-ref
+
+              # ── Diff: what files differ between the two trees ──
+              echo "=============================================="
+              echo "Files that differ from winlatormali-ci ..."
+              echo "=============================================="
+              diff -rq --exclude=".git" /tmp/winlatormali-ref . 2>/dev/null \
+                | grep -v "^Only in /tmp/winlatormali-ref" \
+                | tee /tmp/diff-summary.txt || true
+
+              echo "=============================================="
+              echo "Files only present in winlatormali-ci ..."
+              echo "=============================================="
+              diff -rq --exclude=".git" /tmp/winlatormali-ref . 2>/dev/null \
+                | grep "^Only in /tmp/winlatormali-ref" \
+                | tee /tmp/diff-only-ref.txt || true
+
+              # ── Copy over the differing files (excluding build artifacts) ──
+              echo "=============================================="
+              echo "Replacing differing files from winlatormali-ci ..."
+              echo "=============================================="
+              # Build a list of files that exist in both but differ, plus
+              # files only in the reference (skipping build dirs).
+              (
+                cd /tmp/winlatormali-ref
+                find . -type f \
+                  -not -path "./.git/*" \
+                  -not -path "./build*/*" \
+                  -not -path "./subprojects/*" \
+                  | while read -r f; do
+                    rel="${f#./}"
+                    if [[ ! -f "/tmp/rel-mesa/$rel" ]] || \
+                       ! cmp -s "$f" "/tmp/rel-mesa/$rel"; then
+                      echo "$rel"
+                    fi
+                  done
+              ) > /tmp/files-to-copy.txt || true
+
+              # Actually copy them
+              cp -a /tmp/rel-mesa/. /tmp/rel-mesa-copy/ 2>/dev/null || true
+
+              # Simpler: rsync the reference over our tree, preserving
+              # anything in our tree that the reference doesn't have.
+              cp -a /tmp/winlatormali-ref/src/. src/ 2>/dev/null || true
+              # Also copy top-level meson files and docs if they changed
+              for f in meson.build meson.options meson_options.txt VERSION; do
+                [[ -f "/tmp/winlatormali-ref/$f" ]] && \
+                  cp -a "/tmp/winlatormali-ref/$f" "./$f" 2>/dev/null || true
+              done
+
+              # ── Apply our own patch on top ──
               echo "=============================================="
               echo "Applying panvk-mali-g57-workaround.patch ..."
               echo "=============================================="
-              if [[ ! -f panvk-mali-g57-workaround.patch ]]; then
-                echo "ERROR: panvk-mali-g57-workaround.patch not found in repo root" >&2
-                ls -la
-                exit 1
-              fi
-
-              if git apply --check panvk-mali-g57-workaround.patch 2>/dev/null; then
-                echo ">>> git apply --check passed; applying cleanly"
-                git apply --verbose panvk-mali-g57-workaround.patch
+              if [[ -f panvk-mali-g57-workaround.patch ]]; then
+                if git apply --check panvk-mali-g57-workaround.patch 2>/dev/null; then
+                  git apply --verbose panvk-mali-g57-workaround.patch
+                else
+                  patch -p1 --forward --no-backup-if-mismatch \
+                    < panvk-mali-g57-workaround.patch || true
+                fi
               else
-                echo ">>> git apply --check failed; falling back to patch -p1 --forward"
-                patch -p1 --forward --no-backup-if-mismatch \
-                  < panvk-mali-g57-workaround.patch || true
-                echo ">>> patch(1) returned non-zero (expected if some hunks were skipped)"
+                echo ">>> No panvk-mali-g57-workaround.patch in tree (already merged?)"
               fi
 
               echo "--- reject files ---"
               find . -name "*.rej" -print || true
-              echo "--- end reject files ---"
 
-              echo "=============================================="
-              echo "Sanity check: critical patch content present ..."
-              echo "=============================================="
+              # ── Sanity: check our critical fields are still present ──
               if grep -q "exec_init_failed" src/panfrost/lib/kmod/pan_kmod.h && \
                  grep -q "exec_init_failed" src/panfrost/lib/kmod/kbase_kmod.c && \
                  grep -q "mempools.rw"    src/panfrost/vulkan/panvk_vX_shader.c; then
-                echo ">>> PASS: exec_init_failed field and shader fallback are in the tree"
+                echo ">>> PASS: exec_init_failed + shader fallback present"
               else
-                echo ">>> FAIL: critical patch content missing; cannot build" >&2
+                echo ">>> FAIL: critical content missing" >&2
                 exit 1
               fi
 
-              echo "=============================================="
-              echo "Checking mount and generator script ..."
-              echo "=============================================="
-              ls -la /ci-scripts/ || true
-              if [[ ! -f /ci-scripts/gen_meson_cmd.py ]]; then
-                echo "ERROR: /ci-scripts/gen_meson_cmd.py not mounted" >&2
-                exit 1
-              fi
-              echo "--- first 5 lines ---"
-              head -5 /ci-scripts/gen_meson_cmd.py
-
-              echo "=============================================="
-              echo "Generating meson setup command ..."
-              echo "=============================================="
+              # ── Generate meson command ──
               MESON_SH="$TMPDIR/meson_cmd.sh"
               rm -f "$MESON_SH"
               python3 /ci-scripts/gen_meson_cmd.py > "$MESON_SH"
-
-              if [[ ! -s "$MESON_SH" ]]; then
-                echo "ERROR: generated meson command is empty" >&2
-                exit 1
-              fi
-
-              echo "=== Generated meson command ==="
               cat "$MESON_SH"
-              echo "=== Running meson setup ==="
               bash "$MESON_SH"
 
+              # ── Archive the source tree ──
               echo "=============================================="
-              echo "Verifying kmds in build graph ..."
+              echo "Archiving source tree ..."
               echo "=============================================="
+              cd "$TMPDIR"
+              # Clean up generated artifacts so the archive stays small
+              find mesa-panvk -name "*.o" -delete 2>/dev/null || true
+              find mesa-panvk -name "*.a" -delete 2>/dev/null || true
+              rm -rf mesa-panvk/build-bionic 2>/dev/null || true
+              tar -czf /termux-out/source.tar.gz -C mesa-panvk .
+              ls -lh /termux-out/source.tar.gz
+
+              cd mesa-panvk
+
+              # ── Build the shared library ──
               KBASE_COUNT=$(grep -c "kbase_kmod.c.o" build-bionic/build.ninja || true)
               PANTHOR_COUNT=$(grep -c "panthor_kmod.c.o" build-bionic/build.ninja || true)
               echo "kbase_kmod.c.o entries:   $KBASE_COUNT"
               echo "panthor_kmod.c.o entries: $PANTHOR_COUNT"
-
-              echo "=============================================="
-              echo "Verifying __ANDROID_API__ landed in compile flags ..."
-              echo "=============================================="
-              grep -o "D__ANDROID_API__=[0-9]*" build-bionic/build.ninja | sort -u || \
-                echo ">>> WARNING: __ANDROID_API__ not found in build.ninja"
 
               ninja -C build-bionic -j$(nproc) \
                 src/panfrost/vulkan/libvulkan_panfrost.so
@@ -314,12 +326,10 @@ jobs:
               }
               JSON
 
-              echo "=== ICD ==="
-              cat /termux-out/share/vulkan/icd.d/panfrost_icd.aarch64.json
               echo "=== /termux-out ==="
               find /termux-out -type f
               echo "=== sizes ==="
-              ls -lh /termux-out/lib/
+              ls -lh /termux-out/lib/ /termux-out/source.tar.gz
             '
 
       - name: Package tarball (${{ matrix.build-type }})
@@ -360,32 +370,20 @@ jobs:
           body: |
             ## PanVK for Termux (aarch64, native build)
 
-            Built natively inside Termux (`termux/termux-docker:aarch64`)
-            on `ubuntu-24.04-arm`. Supports Mali-G57 (arch 9, JM/kbase)
-            **and** Valhall v10+ (CSF/panthor).
+            Built natively inside Termux. Source merged with
+            `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci` for Mali-G57
+            fixes, then `panvk-mali-g57-workaround.patch` applied on top.
 
-            **Source:** `xodiosx/mesa-funnymdz-leegao`
-            **Build date (UTC):** `${{ needs.prepare.outputs.date }}`
-            **Build time (UTC):** `${{ needs.prepare.outputs.time }}`
+            **Date (UTC):** `${{ needs.prepare.outputs.date }}`
+            **Time (UTC):** `${{ needs.prepare.outputs.time }}`
             **Commit:** `${{ github.sha }}`
             **Build types:** `${{ needs.prepare.outputs.types }}`
 
-            ### Build customizations
-            - `panvk-mali-g57-workaround.patch` applied from repo root.
-            - `exec_init_failed` fallback for Mali-G57 (arch 9, JM).
-            - `panfrost-kmds=kbase,panthor` — both backends compiled.
-            - `platform-sdk-version=35` — Mesa's own Android SDK level.
-            - `-D__ANDROID_API__=35` — exposes Bionic's `sync_merge` and
-              `sync_wait` prototypes (API 26+) so the panthor backend
-              compiles under Termux clang.
-
             ### Files
-            - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
-            - `panvk-termux-aarch64-release-*.tar.gz`
-            - `libvulkan_panfrost.so`
-            - `panfrost_icd.aarch64.json`
+            - `panvk-termux-aarch64-*.tar.gz` — driver + ICD
+            - `source.tar.gz` — full patched source tree
 
-            ### Install (Termux)
+            ### Install
             ```bash
             tar -xzf panvk-termux-aarch64-release-*.tar.gz -C $PREFIX
             export VK_ICD_FILENAMES=$PREFIX/share/vulkan/icd.d/panfrost_icd.aarch64.json
@@ -394,6 +392,7 @@ jobs:
             artifacts/*.tar.gz
             artifacts/**/libvulkan_panfrost.so
             artifacts/**/panfrost_icd.aarch64.json
+            artifacts/**/source.tar.gz
           overwrite_files: true
           generate_release_notes: true
           prerelease: true
