@@ -82,6 +82,10 @@ jobs:
           #!/usr/bin/env python3
           """
           Read meson.options, emit a `meson setup` shell command on stdout.
+
+          PanVK-only build: CLC (OpenCL C compiler) is explicitly disabled
+          because it requires a SPIRV-Tools feature (PR #5534) that the
+          Termux spirv-tools package does not ship. PanVK does not need CLC.
           """
           import os
           import re
@@ -129,6 +133,22 @@ jobs:
               "-Dc_link_args=-landroid-shmem",
               "-Dcpp_link_args=-landroid-shmem",
           ]
+
+          # Disable CLC / OpenCL C compiler: not needed for PanVK, and it
+          # requires a SPIRV-Tools feature the Termux package lacks.
+          if "mesa-clc" in opts:
+              args.append("-Dmesa-clc=disabled")
+              print(">>> Adding: -Dmesa-clc=disabled", file=sys.stderr)
+          if "install-mesa-clc" in opts:
+              args.append("-Dinstall-mesa-clc=false")
+              print(">>> Adding: -Dinstall-mesa-clc=false", file=sys.stderr)
+          if "microsoft-clc" in opts:
+              args.append("-Dmicrosoft-clc=disabled")
+              print(">>> Adding: -Dmicrosoft-clc=disabled", file=sys.stderr)
+          if "gallium-clover" in opts:
+              args.append("-Dgallium-clover=false")
+          if "gallium-rusticl" in opts:
+              args.append("-Dgallium-rusticl=false")
 
           if "panfrost-kmds" in opts:
               args.append("-Dpanfrost-kmds=kbase,panthor")
@@ -187,69 +207,59 @@ jobs:
                 libclc spirv-llvm-translator libxrandr libxrandr-static file \
                 patch
 
-              pip install --break-system-packages meson mako pyyaml packaging setuptools
+              pip install --break-system-packages \
+                meson mako pyyaml packaging ply setuptools
 
               cd "$TMPDIR"
               rm -rf mesa-panvk
               git clone --depth 1 https://github.com/xodiosx/mesa-funnymdz-leegao.git mesa-panvk
               cd mesa-panvk
 
-              # ── Fetch the winlatormali-ci branch as a reference tree ──
+              # ── Fetch winlatormali-ci reference tree (under $TMPDIR, not /tmp) ──
               echo "=============================================="
               echo "Fetching winlatormali-ci reference tree ..."
               echo "=============================================="
+              REF_DIR="$TMPDIR/winlatormali-ref"
+              rm -rf "$REF_DIR"
               git clone --depth 1 \
                 --branch winlatormali-ci \
                 https://github.com/mexicanbr0auth/mesa-panvk-g57.git \
-                /tmp/winlatormali-ref
+                "$REF_DIR"
 
-              # ── Diff: what files differ between the two trees ──
+              # ── Diff against our tree ──
               echo "=============================================="
               echo "Files that differ from winlatormali-ci ..."
               echo "=============================================="
-              diff -rq --exclude=".git" /tmp/winlatormali-ref . 2>/dev/null \
-                | grep -v "^Only in /tmp/winlatormali-ref" \
-                | tee /tmp/diff-summary.txt || true
+              diff -rq --exclude=".git" \
+                --exclude="build-bionic" \
+                --exclude="build-host" \
+                "$REF_DIR" . 2>/dev/null \
+                | grep -v "^Only in $REF_DIR" \
+                | tee "$TMPDIR/diff-summary.txt" || true
 
               echo "=============================================="
               echo "Files only present in winlatormali-ci ..."
               echo "=============================================="
-              diff -rq --exclude=".git" /tmp/winlatormali-ref . 2>/dev/null \
-                | grep "^Only in /tmp/winlatormali-ref" \
-                | tee /tmp/diff-only-ref.txt || true
+              diff -rq --exclude=".git" \
+                --exclude="build-bionic" \
+                --exclude="build-host" \
+                "$REF_DIR" . 2>/dev/null \
+                | grep "^Only in $REF_DIR" \
+                | tee "$TMPDIR/diff-only-ref.txt" || true
 
-              # ── Copy over the differing files (excluding build artifacts) ──
+              # ── Overlay differing files from the reference tree ──
               echo "=============================================="
-              echo "Replacing differing files from winlatormali-ci ..."
+              echo "Overlaying winlatormali-ci files ..."
               echo "=============================================="
-              # Build a list of files that exist in both but differ, plus
-              # files only in the reference (skipping build dirs).
-              (
-                cd /tmp/winlatormali-ref
-                find . -type f \
-                  -not -path "./.git/*" \
-                  -not -path "./build*/*" \
-                  -not -path "./subprojects/*" \
-                  | while read -r f; do
-                    rel="${f#./}"
-                    if [[ ! -f "/tmp/rel-mesa/$rel" ]] || \
-                       ! cmp -s "$f" "/tmp/rel-mesa/$rel"; then
-                      echo "$rel"
-                    fi
-                  done
-              ) > /tmp/files-to-copy.txt || true
-
-              # Actually copy them
-              cp -a /tmp/rel-mesa/. /tmp/rel-mesa-copy/ 2>/dev/null || true
-
-              # Simpler: rsync the reference over our tree, preserving
-              # anything in our tree that the reference doesn't have.
-              cp -a /tmp/winlatormali-ref/src/. src/ 2>/dev/null || true
-              # Also copy top-level meson files and docs if they changed
+              if [[ -d "$REF_DIR/src" ]]; then
+                cp -a "$REF_DIR/src/." src/ 2>/dev/null || true
+              fi
               for f in meson.build meson.options meson_options.txt VERSION; do
-                [[ -f "/tmp/winlatormali-ref/$f" ]] && \
-                  cp -a "/tmp/winlatormali-ref/$f" "./$f" 2>/dev/null || true
+                if [[ -f "$REF_DIR/$f" ]]; then
+                  cp -a "$REF_DIR/$f" "./$f" 2>/dev/null || true
+                fi
               done
+              echo "Overlay done."
 
               # ── Apply our own patch on top ──
               echo "=============================================="
@@ -263,13 +273,13 @@ jobs:
                     < panvk-mali-g57-workaround.patch || true
                 fi
               else
-                echo ">>> No panvk-mali-g57-workaround.patch in tree (already merged?)"
+                echo ">>> No panvk-mali-g57-workaround.patch in tree"
               fi
 
               echo "--- reject files ---"
               find . -name "*.rej" -print || true
 
-              # ── Sanity: check our critical fields are still present ──
+              # ── Sanity ──
               if grep -q "exec_init_failed" src/panfrost/lib/kmod/pan_kmod.h && \
                  grep -q "exec_init_failed" src/panfrost/lib/kmod/kbase_kmod.c && \
                  grep -q "mempools.rw"    src/panfrost/vulkan/panvk_vX_shader.c; then
@@ -286,12 +296,11 @@ jobs:
               cat "$MESON_SH"
               bash "$MESON_SH"
 
-              # ── Archive the source tree ──
+              # ── Archive source (before building, so it is clean) ──
               echo "=============================================="
               echo "Archiving source tree ..."
               echo "=============================================="
               cd "$TMPDIR"
-              # Clean up generated artifacts so the archive stays small
               find mesa-panvk -name "*.o" -delete 2>/dev/null || true
               find mesa-panvk -name "*.a" -delete 2>/dev/null || true
               rm -rf mesa-panvk/build-bionic 2>/dev/null || true
@@ -300,7 +309,7 @@ jobs:
 
               cd mesa-panvk
 
-              # ── Build the shared library ──
+              # ── Build ──
               KBASE_COUNT=$(grep -c "kbase_kmod.c.o" build-bionic/build.ninja || true)
               PANTHOR_COUNT=$(grep -c "panthor_kmod.c.o" build-bionic/build.ninja || true)
               echo "kbase_kmod.c.o entries:   $KBASE_COUNT"
@@ -379,11 +388,25 @@ jobs:
             **Commit:** `${{ github.sha }}`
             **Build types:** `${{ needs.prepare.outputs.types }}`
 
+            ### Build customizations
+            - `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci` overlaid
+              onto the base tree (Mali-G57 fixes).
+            - `panvk-mali-g57-workaround.patch` applied on top.
+            - `exec_init_failed` fallback for Mali-G57 (arch 9, JM).
+            - `panfrost-kmds=kbase,panthor` — both backends compiled.
+            - `platform-sdk-version=35` + `-D__ANDROID_API__=35` — exposes
+              Bionic's `sync_merge` / `sync_wait` for the panthor backend.
+            - CLC/OpenCL C compiler disabled (PanVK does not need it; the
+              Termux SPIRV-Tools package lacks a required upstream feature).
+
             ### Files
-            - `panvk-termux-aarch64-*.tar.gz` — driver + ICD
+            - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
+            - `panvk-termux-aarch64-release-*.tar.gz`
+            - `libvulkan_panfrost.so`
+            - `panfrost_icd.aarch64.json`
             - `source.tar.gz` — full patched source tree
 
-            ### Install
+            ### Install (Termux)
             ```bash
             tar -xzf panvk-termux-aarch64-release-*.tar.gz -C $PREFIX
             export VK_ICD_FILENAMES=$PREFIX/share/vulkan/icd.d/panfrost_icd.aarch64.json
