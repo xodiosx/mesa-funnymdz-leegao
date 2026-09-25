@@ -82,8 +82,7 @@ jobs:
           #!/usr/bin/env python3
           """
           Read meson.options, emit a `meson setup` shell command on stdout.
-          Handles multi-line option declarations that a single-line grep
-          would miss.
+          Handles multi-line option declarations.
           """
           import os
           import re
@@ -172,6 +171,11 @@ jobs:
               export TMPDIR="${TMPDIR:-$PREFIX/tmp}"
               export BUILD_TYPE="'"${{ matrix.build-type }}"'"
 
+              # Ensure the tmp dir exists and is writable.
+              mkdir -p "$TMPDIR"
+              echo ">>> TMPDIR=$TMPDIR"
+              ls -ld "$TMPDIR"
+
               mkdir -p "$PREFIX/etc/apt/sources.list.d"
               echo "deb https://packages.termux.dev/apt/termux-main stable main" \
                 > "$PREFIX/etc/apt/sources.list.d/termux-main.list"
@@ -201,7 +205,6 @@ jobs:
 
               pip install --break-system-packages meson mako pyyaml packaging
 
-              mkdir -p "$TMPDIR"
               cd "$TMPDIR"
               rm -rf mesa-panvk
               git clone --depth 1 https://github.com/xodiosx/mesa-funnymdz-leegao.git mesa-panvk
@@ -243,18 +246,34 @@ jobs:
               fi
 
               echo "=============================================="
-              echo "Generating meson setup command ..."
+              echo "Checking mount and generator script ..."
               echo "=============================================="
+              ls -la /ci-scripts/ || true
               if [[ ! -f /ci-scripts/gen_meson_cmd.py ]]; then
                 echo "ERROR: /ci-scripts/gen_meson_cmd.py not mounted" >&2
                 exit 1
               fi
-              python3 /ci-scripts/gen_meson_cmd.py > /tmp/meson_cmd.sh
+              echo "--- first 5 lines ---"
+              head -5 /ci-scripts/gen_meson_cmd.py
+
+              echo "=============================================="
+              echo "Generating meson setup command ..."
+              echo "=============================================="
+              MESON_SH="$TMPDIR/meson_cmd.sh"
+              rm -f "$MESON_SH"
+              python3 /ci-scripts/gen_meson_cmd.py > "$MESON_SH"
+
+              if [[ ! -s "$MESON_SH" ]]; then
+                echo "ERROR: generated meson command is empty" >&2
+                echo "--- python stderr was shown above; dumping file ---"
+                ls -la "$MESON_SH" 2>&1 || true
+                exit 1
+              fi
 
               echo "=== Generated meson command ==="
-              cat /tmp/meson_cmd.sh
+              cat "$MESON_SH"
               echo "=== Running meson setup ==="
-              bash /tmp/meson_cmd.sh
+              bash "$MESON_SH"
 
               echo "=============================================="
               echo "Verifying kmds in build graph ..."
