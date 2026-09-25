@@ -206,7 +206,6 @@ jobs:
               git clone --depth 1 https://github.com/xodiosx/mesa-funnymdz-leegao.git mesa-panvk
               cd mesa-panvk
 
-              # ── Fetch winlatormali-ci reference tree ──
               echo "=============================================="
               echo "Fetching winlatormali-ci reference tree ..."
               echo "=============================================="
@@ -237,7 +236,6 @@ jobs:
                 | grep "^Only in $REF_DIR" \
                 | tee "$TMPDIR/diff-only-ref.txt" || true
 
-              # ── Overlay differing files ──
               echo "=============================================="
               echo "Overlaying winlatormali-ci files ..."
               echo "=============================================="
@@ -251,7 +249,6 @@ jobs:
               done
               echo "Overlay done."
 
-              # ── Apply our own patch ──
               echo "=============================================="
               echo "Applying panvk-mali-g57-workaround.patch ..."
               echo "=============================================="
@@ -266,21 +263,12 @@ jobs:
                 echo ">>> No panvk-mali-g57-workaround.patch in tree"
               fi
 
-              # ══════════════════════════════════════════════════════
-              # CLC FIX: remove with_panfrost_vk from with_driver_using_cl.
-              #
-              # The fork lists panvk in with_driver_using_cl, which forces
-              # with_clc = true for a panvk-only build. That drags in
-              # src/compiler/clc/meson.build, which then aborts on the
-              # SPIRV-Tools PR #5534 feature check (the Termux spirv-tools
-              # package doesn't ship SetAllowPtrTypeMismatch).
-              #
-              # PanVK does not use CLC. Removing the token makes with_clc
-              # false so the CLC subdir is never entered.
-              #
-              # This has to run AFTER the winlatormali-ci overlay because
-              # the overlay restores the unmodified meson.build.
-              # ══════════════════════════════════════════════════════
+              # Remove with_panfrost_vk from with_driver_using_cl so that
+              # with_clc stays false. If CLC is entered, it aborts on the
+              # SPIRV-Tools PR 5534 feature check, which the Termux
+              # spirv-tools package does not provide.
+              # Must run AFTER the overlay because the overlay restores
+              # the unmodified meson.build.
               echo "=============================================="
               echo "Fixing with_driver_using_cl (remove panvk) ..."
               echo "=============================================="
@@ -316,7 +304,6 @@ jobs:
               cat "$MESON_SH"
               bash "$MESON_SH"
 
-              # ── Archive source ──
               echo "=============================================="
               echo "Archiving source tree ..."
               echo "=============================================="
@@ -411,19 +398,19 @@ jobs:
             - `mexicanbr0auth/mesa-panvk-g57@winlatormali-ci` overlaid.
             - `panvk-mali-g57-workaround.patch` applied on top.
             - `exec_init_failed` fallback for Mali-G57 (arch 9, JM).
-            - `panfrost-kmds=kbase,panthor` — both backends compiled.
-            - `platform-sdk-version=35` + `-D__ANDROID_API__=35` — exposes
-              Bionic's `sync_merge` / `sync_wait` for panthor.
-            - `with_panfrost_vk` removed from `with_driver_using_cl` — skips
-              the CLC subdir (which would otherwise fail the SPIRV-Tools
-              PR #5534 feature check).
+            - `panfrost-kmds=kbase,panthor` -- both backends compiled.
+            - `platform-sdk-version=35` plus `-D__ANDROID_API__=35` to
+              expose Bionic sync_merge / sync_wait for the panthor backend.
+            - `with_panfrost_vk` removed from `with_driver_using_cl` so the
+              CLC subdir is skipped and the SPIRV-Tools PR 5534 check does
+              not run.
 
             ### Files
             - `panvk-termux-aarch64-debugoptimized-*.tar.gz`
             - `panvk-termux-aarch64-release-*.tar.gz`
             - `libvulkan_panfrost.so`
             - `panfrost_icd.aarch64.json`
-            - `source.tar.gz` — full patched source tree
+            - `source.tar.gz` -- full patched source tree
 
             ### Install (Termux)
             ```bash
