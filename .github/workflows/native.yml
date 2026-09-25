@@ -195,8 +195,8 @@ jobs:
               REF_DIR="$TMPDIR/winlatormali-ref"
               rm -rf "$REF_DIR"
               git clone --depth 1 \
-                --branch winlatormali-ci \
-                https://github.com/mexicanbr0auth/mesa-panvk-g57.git \
+                --branch main \
+                https://github.com/crowndoom/mesa-panvk-g57.git \
                 "$REF_DIR"
 
               echo "=============================================="
