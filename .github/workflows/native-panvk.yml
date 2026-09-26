@@ -1,4 +1,4 @@
-name: release PanVK + Zink for winlator (aarch64, native)
+name: release PanVK + Zink for Winlator (aarch64, cross-compile)
 
 on:
   push:
@@ -6,15 +6,6 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      build_type:
-        description: "Build type"
-        type: choice
-        required: true
-        default: both
-        options:
-          - both
-          - debugoptimized
-          - release
       release_tag:
         description: "Tag to create (leave empty to auto-generate)"
         required: false
@@ -31,7 +22,6 @@ jobs:
       time:  ${{ steps.ts.outputs.time }}
       stamp: ${{ steps.ts.outputs.stamp }}
       tag:   ${{ steps.ts.outputs.tag }}
-      types: ${{ steps.ts.outputs.types }}
     steps:
       - name: Compute build timestamp and tag
         id: ts
@@ -54,24 +44,17 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-          CHOICE="${{ github.event.inputs.build_type }}"
-          case "$CHOICE" in
-            release)        TYPES='["release"]' ;;
-            debugoptimized) TYPES='["debugoptimized"]' ;;
-            *)              TYPES='["debugoptimized","release"]' ;;
-          esac
-          echo "types=$TYPES" >> "$GITHUB_OUTPUT"
-
   prepare-winlator-branch:
     needs: [prepare]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
-      BASE_REPO: "xodiosx/mesa-panvk-mali-g57"
-      WINLATOR_REPO: "Mateus-tokokudo/mesa-funnymdzz"
-      WINLATOR_BRANCH: "winlatormali-ci"
-      TARGET_BRANCH: "winlator"
+      # Only these two repos are ever contacted.
+      BASE_REPO:      "xodiosx/mesa-panvk-mali-g57"
+      WINLATOR_REPO:  "mexicanbr0auth/mesa-panvk-g57"
+      WINLATOR_BRANCH: "winlator-cl"
+      TARGET_BRANCH:  "winlator"
     steps:
       - name: Checkout (for push credentials)
         uses: actions/checkout@v4
@@ -244,32 +227,83 @@ jobs:
           echo "--- wrote ci-scripts/patch_panvkdbg.py ---"
           wc -l "${{ github.workspace }}/ci-scripts/patch_panvkdbg.py"
 
-      - name: Clone base + winlatormali-ci
+      - name: Clone base + winlator source
         run: |
           set -euo pipefail
           rm -rf /tmp/base /tmp/winlator-src
 
+          echo "=============================================="
+          echo "Branches available in $WINLATOR_REPO:"
+          echo "=============================================="
+          git ls-remote --heads "https://github.com/$WINLATOR_REPO.git" \
+            | awk '{print "  " $2}' | sed 's|refs/heads/||' | sort
+
+          echo
+          echo "=============================================="
+          echo "Selecting branch (preferred: $WINLATOR_BRANCH)"
+          echo "=============================================="
+
+          CANDIDATES="$WINLATOR_BRANCH winlator-cl winlator main master"
+          USED=""
+
+          for br in $CANDIDATES; do
+            if git ls-remote --heads \
+                 "https://github.com/$WINLATOR_REPO.git" \
+                 "refs/heads/$br" 2>/dev/null | grep -q "refs/heads/$br"; then
+              USED="$br"
+              echo ">>> matched candidate: $br"
+              break
+            else
+              echo "    not present: $br"
+            fi
+          done
+
+          if [[ -z "$USED" ]]; then
+            USED=$(git ls-remote --symref \
+                     "https://github.com/$WINLATOR_REPO.git" HEAD 2>/dev/null \
+                   | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')
+            echo ">>> no candidate matched; using repo default: ${USED:-<unknown>}"
+          fi
+
+          if [[ -z "$USED" ]]; then
+            echo "ERROR: could not determine any usable branch from $WINLATOR_REPO" >&2
+            exit 1
+          fi
+
+          echo "WINLATOR_BRANCH_USED=$USED" >> "$GITHUB_ENV"
+
+          echo
           echo "==== cloning base: $BASE_REPO ===="
           git clone --depth 1 "https://github.com/$BASE_REPO.git" /tmp/base
 
-          echo "==== cloning $WINLATOR_REPO @ $WINLATOR_BRANCH ===="
-          git clone --depth 1 --branch "$WINLATOR_BRANCH" \
+          echo "==== cloning $WINLATOR_REPO @ $USED ===="
+          git clone --depth 1 --branch "$USED" \
             "https://github.com/$WINLATOR_REPO.git" /tmp/winlator-src
 
           rm -rf /tmp/base/.git /tmp/winlator-src/.git
 
+          echo
           echo "==== base top-level ===="
           ls -A /tmp/base | head -40
           echo "==== winlator-src top-level ===="
           ls -A /tmp/winlator-src | head -40
 
-      - name: Copy missing files from winlatormali-ci into base
+          echo
+          echo "==== does winlator-src contain the CI scripts? ===="
+          if [[ -d /tmp/winlator-src/.github/winlatormali ]]; then
+            ls -la /tmp/winlator-src/.github/winlatormali/
+          else
+            echo "NOTE: .github/winlatormali/ not present on $USED"
+            find /tmp/winlator-src/.github -maxdepth 3 -type f 2>/dev/null || true
+          fi
+
+      - name: Copy missing files from winlator source into base
         run: |
           set -euo pipefail
           cd /tmp/winlator-src
 
           echo "=============================================="
-          echo "Files present only in winlatormali-ci:"
+          echo "Files present only in $WINLATOR_BRANCH_USED:"
           echo "=============================================="
           COUNT=0
           while IFS= read -r rel; do
@@ -279,7 +313,6 @@ jobs:
 
             dest="/tmp/base/$rel"
             if [[ -e "$dest" ]]; then
-              # Exists in base — will be handled by the normal patch.
               continue
             fi
 
@@ -292,14 +325,11 @@ jobs:
           echo
           echo "Total new files copied: $COUNT"
 
-      - name: Generate patch (base → winlatormali-ci) and apply
+      - name: Generate patch (base → winlator) and apply
         run: |
           set -euo pipefail
           cd /tmp
 
-          # Now that missing files have been copied, the diff contains only
-          # differences on files that exist in BOTH trees. New files are
-          # already in place and therefore identical in both trees.
           diff -ruN \
             --exclude='.git' \
             base winlator-src > /tmp/winlator.patch || true
@@ -370,15 +400,19 @@ jobs:
           path: ${{ github.workspace }}/winlator-patch/winlator.patch
           if-no-files-found: warn
 
+  # ─────────────────────────────────────────────────────────────
+  # Cross-compile for Winlator on x86_64 using the NDK and the
+  # CI scripts already present on the winlator branch (copied from
+  # the winlator source repo above).
+  # ─────────────────────────────────────────────────────────────
   build:
     needs: [prepare, prepare-winlator-branch]
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        build-type: ${{ fromJSON(needs.prepare.outputs.types) }}
-
+    env:
+      NDK_VERSION: 28.2.13676358
+      ANDROID_API: '35'
+      BUILD_JOBS: '2'
     steps:
       - name: Checkout winlator branch
         uses: actions/checkout@v4
@@ -387,163 +421,87 @@ jobs:
           fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Report checked-out commit
+      - name: Report checked-out commit and CI scripts
         run: |
           set -euo pipefail
           git --no-pager log -1 --oneline
           echo "---- workspace top ----"
           ls -A | head -40
+          echo "---- .github/winlatormali ----"
+          ls -la .github/winlatormali/ 2>/dev/null || echo "  (missing)"
+          echo "---- .github/workflows ----"
+          ls -la .github/workflows/ 2>/dev/null || echo "  (missing)"
 
-      - name: Build PanVK + Zink (${{ matrix.build-type }}) inside Termux container
+      - name: Verify build scripts are present
         run: |
           set -euo pipefail
+          MISSING=0
+          for f in .github/winlatormali/build.sh .github/winlatormali/package.py; do
+            if [[ ! -f "$f" ]]; then
+              echo "ERROR: $f missing on the winlator branch"
+              MISSING=1
+            else
+              echo "OK: $f"
+            fi
+          done
+          if [[ "$MISSING" -eq 1 ]]; then
+            echo "---- .github/ contents on this branch ----"
+            find .github -maxdepth 3 -type f 2>/dev/null || true
+            echo "------------------------------------------"
+            echo "The winlator source branch didn't carry these scripts."
+            echo "Check the WINLATOR_REPO / WINLATOR_BRANCH env values in"
+            echo "prepare-winlator-branch, or commit the scripts into the"
+            echo "winlator branch manually."
+            exit 1
+          fi
 
-          mkdir -p "${{ github.workspace }}/termux-out-${{ matrix.build-type }}"
-          chmod 777 "${{ github.workspace }}/termux-out-${{ matrix.build-type }}"
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake pkgconf bison flex ripgrep \
+            clang-19 llvm-19-dev libclang-19-dev libclang-cpp19-dev \
+            libclc-19 libclc-19-dev libllvmspirvlib-19-dev libdrm-dev \
+            zlib1g-dev python3-venv patchelf
+          python3 -m venv .ci-python
+          .ci-python/bin/pip install meson==1.8.3 Mako==1.3.10 \
+            packaging==25.0 PyYAML==6.0.2 ply==3.11
+          echo "$GITHUB_WORKSPACE/.ci-python/bin" >> "$GITHUB_PATH"
 
-          docker run --rm \
-            -v "${{ github.workspace }}:/src:ro" \
-            -v "${{ github.workspace }}/termux-out-${{ matrix.build-type }}:/termux-out" \
-            termux/termux-docker:aarch64 \
-            bash -c '
-              set -euo pipefail
-              export TMPDIR="${TMPDIR:-$PREFIX/tmp}"
-              export BUILD_TYPE="'"${{ matrix.build-type }}"'"
-
-              mkdir -p "$PREFIX/etc/apt/sources.list.d"
-              echo "deb https://packages.termux.dev/apt/termux-main stable main" \
-                > "$PREFIX/etc/apt/sources.list.d/termux-main.list"
-
-              for i in 1 2 3; do
-                if pkg update -y; then break; fi
-                echo "pkg update attempt $i failed, retrying in 10s..."
-                sleep 10
-                if [[ $i -eq 3 ]]; then
-                  echo "pkg update failed after 3 attempts" >&2
-                  exit 1
-                fi
-              done
-
-              pkg install -y x11-repo tur-repo
-              pkg update -y || true
-
-              pkg install -y \
-                git clang lld binutils cmake autoconf automake libtool make python python-pip ninja llvm bison flex pkg-config \
-                fontconfig freetype gnutls libgnutls libgmp \
-                libandroid-shmem libandroid-shmem-static libandroid-spawn \
-                libx11 xorgproto libdrm libpixman libjpeg-turbo xtrans libxxf86vm xorg-xrandr \
-                xorg-font-util xorg-util-macros libxfont2 libxkbfile libpciaccess \
-                xcb-util-renderutil xcb-util-image xcb-util-keysyms xcb-util-wm \
-                xorg-xkbcomp xkeyboard-config libxdamage libxinerama libxshmfence \
-                libxcb libxcomposite libxcursor libxfixes libxrender \
-                glslang shaderc vulkan-headers vulkan-loader-generic vulkan-tools \
-                libclc spirv-llvm-translator zlib zstd libexpat \
-                libxrandr libxrandr-static mesa-demos osmesa \
-                pulseaudio termux-x11-nightly patch file perl mesa-dev libglvnd-dev libglvnd
-
-              pip install --break-system-packages meson mako pyyaml packaging setuptools
-
-              mkdir -p "$TMPDIR"
-              cd "$TMPDIR"
-              rm -rf mesa-panvk
-              cp -a /src mesa-panvk
-              cd mesa-panvk
-
-              rm -rf .github ci-scripts winlator-patch termux-out-* build-bionic build-host || true
-
-              echo "==== source tree top ===="
-              ls -A | head -40
-
-              RESIDUAL=$(grep -r "\"PANVKDBG" src/panfrost/ | wc -l || true)
-              echo "Residual \"PANVKDBG literals in source tree: $RESIDUAL"
-
-              meson setup build-bionic \
-                -Dbuildtype="$BUILD_TYPE" \
-                -Dpanvk-use-kbase=true \
-                -Dvulkan-drivers=panfrost \
-                -Dgallium-drivers=zink \
-                -Dplatforms=x11 \
-                -Ddebug=false \
-                -Dstrip=true \
-                -Dbuild-tests=false \
-                -Dc_link_args=-landroid-shmem \
-                -Dcpp_link_args=-landroid-shmem \
-                -Dpanfrost-kmds=kbase,panthor \
-                -Dopengl=true \
-                -Dgles2=enabled \
-                -Degl=enabled \
-                -Dglx=disabled \
-                -Dgbm=disabled \
-                -Dshared-glapi=enabled \
-                -Dlibunwind=disabled \
-                -Dvalgrind=disabled \
-                -Dperfetto=false \
-                -Dprefix="$PREFIX"
-
-              ninja -C build-bionic -j$(nproc)
-
-              SO_STRINGS=$(strings build-bionic/src/panfrost/vulkan/libvulkan_panfrost.so \
-                             | grep -c "^PANVKDBG" || true)
-              echo "PANVKDBG strings in freshly built panvk .so: $SO_STRINGS"
-
-              mkdir -p /termux-out/lib
-              mkdir -p /termux-out/share/vulkan/icd.d
-
-              while IFS= read -r so; do
-                cp -a "$so" /termux-out/lib/
-              done < <(find build-bionic \( -name "*.so" -o -name "*.so.*" \) -type f)
-
-              while IFS= read -r so; do
-                target=$(readlink "$so" || true)
-                if [[ -n "$target" ]]; then
-                  cp -a "$so" /termux-out/lib/ 2>/dev/null || true
-                fi
-              done < <(find build-bionic \( -name "*.so" -o -name "*.so.*" \) -type l)
-
-              for f in \
-                build-bionic/src/panfrost/vulkan/libvulkan_panfrost.so \
-                build-bionic/src/gallium/targets/dri/libgallium_dri.so \
-                build-bionic/src/egl/libEGL.so \
-                build-bionic/src/gallium/targets/egl/libEGL_mesa.so \
-                build-bionic/src/mapi/shared-glapi/libglapi.so \
-                build-bionic/src/glx/libGLX_mesa.so
-              do
-                [[ -e "$f" ]] && cp -a "$f" /termux-out/lib/ || true
-              done
-
-              cat > /termux-out/share/vulkan/icd.d/panfrost_icd.aarch64.json <<JSON
-              {
-                  "ICD": {
-                      "api_version": "1.4.354",
-                      "library_arch": "64",
-                      "library_path": "$PREFIX/lib/libvulkan_panfrost.so"
-                  },
-                  "file_format_version": "1.0.1"
-              }
-              JSON
-
-              echo "=== /termux-out tree ==="
-              find /termux-out -type f -o -type l | sort
-              echo "=== sizes ==="
-              ls -lh /termux-out/lib/
-            '
-
-      - name: Package tarball (${{ matrix.build-type }})
+      - name: Install Android NDK
+        shell: bash
         run: |
           set -euo pipefail
-          cd "termux-out-${{ matrix.build-type }}"
-          TARBALL="panvk-zink-termux-aarch64-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}.tar.gz"
-          tar -czvf "../${TARBALL}" lib/ share/
-          ls -lh "../${TARBALL}"
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [[ -z "$SDKMANAGER" ]]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          "$SDKMANAGER" "ndk;$NDK_VERSION"
+          echo "PANVK_NDK=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
-      - name: Upload artifact
+      - name: Build host tools and Android driver
+        run: bash .github/winlatormali/build.sh
+
+      - name: Validate ELF and create driver ZIP
+        run: python3 .github/winlatormali/package.py
+
+      - name: Upload candidate
         uses: actions/upload-artifact@v4
         with:
-          name: panvk-zink-termux-aarch64-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}
-          path: |
-            termux-out-${{ matrix.build-type }}/
-            panvk-zink-termux-aarch64-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}.tar.gz
+          name: PanVK-G57-WinlatorMali-candidate-${{ needs.prepare.outputs.stamp }}
+          path: out-winlatormali/
           if-no-files-found: error
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PanVK-G57-WinlatorMali-build-logs-${{ needs.prepare.outputs.stamp }}
+          path: |
+            build-winlatormali-native/meson-logs/
+            build-winlatormali-android/meson-logs/
+            ci-winlatormali/build.log
+            ci-winlatormali/provenance.txt
+          if-no-files-found: ignore
 
   release:
     needs: [prepare, prepare-winlator-branch, build]
@@ -567,32 +525,26 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
-          name: "${{ needs.prepare.outputs.tag }} — PanVK + Zink for Termux ${{ needs.prepare.outputs.date }} ${{ needs.prepare.outputs.time }} UTC"
+          name: "${{ needs.prepare.outputs.tag }} — PanVK for Winlator ${{ needs.prepare.outputs.date }} ${{ needs.prepare.outputs.time }} UTC"
           body: |
-            ## PanVK + Zink for Termux (aarch64, native build)
+            ## PanVK for Winlator (aarch64, cross-compile via Android NDK)
 
-            Built natively inside Termux (`termux/termux-docker:aarch64`)
-            on `ubuntu-24.04-arm`.
+            Cross-compiled on `ubuntu-24.04` using NDK `28.2.13676358`
+            and Android API `35`.
 
             **Build date (UTC):** `${{ needs.prepare.outputs.date }}`
             **Build time (UTC):** `${{ needs.prepare.outputs.time }}`
             **Commit:** `${{ github.sha }}`
-            **Build types:** `${{ needs.prepare.outputs.types }}`
 
             ### Source provenance
-            Built from the `winlator` branch, generated by:
+            Built from the `winlator` branch of this repo, generated by:
             - Cloning base repo `xodiosx/mesa-panvk-mali-g57`
-            - Cloning `winlatormali-ci` from `Mateus-tokokudo/mesa-funnymdzz`
-            - Copying files that exist only in `winlatormali-ci` into base
-              (workflow scripts, CI assets, etc.)
+            - Cloning `mexicanbr0auth/mesa-panvk-g57` (winlator-cl branch)
+            - Copying files that exist only in the winlator source into base
             - Patching files that exist in both trees with the diff
             - Applying PANVKDBG neutralizer + driver rename patcher
 
-            The pre-patch diff is attached as `winlator.patch`.
-
-            ### What is included
-            - **PanVK** — Vulkan driver for Mali-G57 (Valhall JM) via kbase
-            - **Zink** — Gallium driver for OpenGL/GLES on top of Vulkan.
+            Pre-patch diff attached as `winlator.patch`.
 
             ### Customizations
             - PANVKDBG debug statements neutralized at the source level.
@@ -601,18 +553,10 @@ jobs:
             - PanVK driver ID changed to `(VkDriverId)0x0000CAFE`.
 
             ### Files
-            - `panvk-zink-termux-aarch64-debugoptimized-*.tar.gz`
-            - `panvk-zink-termux-aarch64-release-*.tar.gz`
-            - `libvulkan_panfrost.so` — PanVK Vulkan driver
-            - `libgallium_dri.so` — contains the Zink Gallium driver
-            - `panfrost_icd.aarch64.json` — ICD manifest
+            - `PanVK-G57-WinlatorMali-candidate-*.zip` — packaged driver
             - `winlator.patch` — diff of files present in both trees
           files: |
-            artifacts/*.tar.gz
-            artifacts/**/libvulkan_panfrost.so
-            artifacts/**/libgallium_dri.so
-            artifacts/**/panfrost_icd.aarch64.json
-            artifacts/**/winlator.patch
+            artifacts/**/*
           overwrite_files: true
           generate_release_notes: true
           prerelease: true
