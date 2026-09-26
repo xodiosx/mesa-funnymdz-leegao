@@ -50,13 +50,15 @@ jobs:
     permissions:
       contents: write
     env:
-      # Only these two repos are ever contacted.
       BASE_REPO:      "xodiosx/mesa-panvk-mali-g57"
       WINLATOR_REPO:  "mexicanbr0auth/mesa-panvk-g57"
       WINLATOR_BRANCH: "winlator-cl"
       TARGET_BRANCH:  "winlator"
+      # Paths to skip entirely (never copied, never diffed, never patched).
+      # Space-separated. Add more here if needed.
+      EXCLUDE_PATHS:  ".github/workflows"
     steps:
-      - name: Checkout (for push credentials)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -302,14 +304,38 @@ jobs:
           set -euo pipefail
           cd /tmp/winlator-src
 
+          # Build a bash-case pattern for the excluded paths.
+          is_excluded() {
+            local rel="$1"
+            for p in $EXCLUDE_PATHS; do
+              case "$rel" in
+                "$p"|"$p"/*) return 0 ;;
+              esac
+            done
+            return 1
+          }
+
+          echo "=============================================="
+          echo "Excluded paths (never copied, never patched):"
+          echo "=============================================="
+          for p in $EXCLUDE_PATHS; do echo "  - $p"; done
+          echo
+
           echo "=============================================="
           echo "Files present only in $WINLATOR_BRANCH_USED:"
           echo "=============================================="
           COUNT=0
+          SKIPPED=0
           while IFS= read -r rel; do
             rel="${rel#./}"
             [[ -z "$rel" ]] && continue
             [[ "$rel" == ".git"* ]] && continue
+
+            if is_excluded "$rel"; then
+              echo "  ~ excluded: $rel"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
 
             dest="/tmp/base/$rel"
             if [[ -e "$dest" ]]; then
@@ -323,15 +349,24 @@ jobs:
           done < <(find . -type f -print | sort)
 
           echo
-          echo "Total new files copied: $COUNT"
+          echo "Total new files copied:   $COUNT"
+          echo "Total files excluded:     $SKIPPED"
 
       - name: Generate patch (base → winlator) and apply
         run: |
           set -euo pipefail
           cd /tmp
 
-          diff -ruN \
-            --exclude='.git' \
+          # Build the list of --exclude=... flags from EXCLUDE_PATHS.
+          EXCLUDES=("--exclude=.git")
+          for p in $EXCLUDE_PATHS; do
+            EXCLUDES+=("--exclude=$p")
+          done
+
+          echo "==== diff excludes ===="
+          printf '  %s\n' "${EXCLUDES[@]}"
+
+          diff -ruN "${EXCLUDES[@]}" \
             base winlator-src > /tmp/winlator.patch || true
 
           ls -lh /tmp/winlator.patch
@@ -353,6 +388,24 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/winlator-patch"
           cp /tmp/winlator.patch "$GITHUB_WORKSPACE/winlator-patch/"
+
+      - name: Sanity check — no workflow files changed
+        run: |
+          set -euo pipefail
+          cd /tmp/base
+          if [[ -d .github/workflows ]]; then
+            echo "==== .github/workflows contents (must be OUR files only) ===="
+            ls -la .github/workflows/
+            echo
+            echo "==== any file mentioning 'winlatormali-ci' under workflows? ===="
+            if grep -rl 'winlatormali-ci' .github/workflows/ 2>/dev/null; then
+              echo "WARNING: winlatormali-ci references found — would break the push"
+            else
+              echo "OK: no foreign workflow references"
+            fi
+          else
+            echo "(no .github/workflows in merged tree)"
+          fi
 
       - name: Apply python patcher
         run: |
@@ -386,6 +439,9 @@ jobs:
           git --no-pager log -1 --oneline
           git --no-pager diff --stat HEAD~1 2>/dev/null | tail -20 || true
 
+          # GITHUB_TOKEN is sufficient now: .github/workflows is excluded
+          # from both the copy and the diff, so the push never modifies
+          # workflow files.
           git remote add origin \
             "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
 
@@ -400,11 +456,6 @@ jobs:
           path: ${{ github.workspace }}/winlator-patch/winlator.patch
           if-no-files-found: warn
 
-  # ─────────────────────────────────────────────────────────────
-  # Cross-compile for Winlator on x86_64 using the NDK and the
-  # CI scripts already present on the winlator branch (copied from
-  # the winlator source repo above).
-  # ─────────────────────────────────────────────────────────────
   build:
     needs: [prepare, prepare-winlator-branch]
     runs-on: ubuntu-24.04
@@ -447,11 +498,6 @@ jobs:
           if [[ "$MISSING" -eq 1 ]]; then
             echo "---- .github/ contents on this branch ----"
             find .github -maxdepth 3 -type f 2>/dev/null || true
-            echo "------------------------------------------"
-            echo "The winlator source branch didn't carry these scripts."
-            echo "Check the WINLATOR_REPO / WINLATOR_BRANCH env values in"
-            echo "prepare-winlator-branch, or commit the scripts into the"
-            echo "winlator branch manually."
             exit 1
           fi
 
@@ -537,11 +583,13 @@ jobs:
             **Commit:** `${{ github.sha }}`
 
             ### Source provenance
-            Built from the `winlator` branch of this repo, generated by:
+            Built from the `winlator` branch, generated by:
             - Cloning base repo `xodiosx/mesa-panvk-mali-g57`
             - Cloning `mexicanbr0auth/mesa-panvk-g57` (winlator-cl branch)
             - Copying files that exist only in the winlator source into base
+              (excluding `.github/workflows/`)
             - Patching files that exist in both trees with the diff
+              (excluding `.github/workflows/`)
             - Applying PANVKDBG neutralizer + driver rename patcher
 
             Pre-patch diff attached as `winlator.patch`.
