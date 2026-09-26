@@ -54,15 +54,13 @@ jobs:
       WINLATOR_REPO:  "mexicanbr0auth/mesa-panvk-g57"
       WINLATOR_BRANCH: "winlator-cl"
       TARGET_BRANCH:  "winlator"
-      # Paths to skip entirely (never copied, never diffed, never patched).
-      # Space-separated. Add more here if needed.
       EXCLUDE_PATHS:  ".github/workflows"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Configure git credentials
         run: |
@@ -70,7 +68,7 @@ jobs:
           git config --local user.email "github-actions@users.noreply.github.com"
           git config --local user.name  "github-actions"
           git remote set-url origin \
-            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+            "https://x-access-token:${{ secrets.GH_PUSH_TOKEN || secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
           git remote -v
 
       - name: Write patcher script
@@ -226,7 +224,6 @@ jobs:
               sys.exit(main())
           PYEOF
           chmod +x "${{ github.workspace }}/ci-scripts/patch_panvkdbg.py"
-          echo "--- wrote ci-scripts/patch_panvkdbg.py ---"
           wc -l "${{ github.workspace }}/ci-scripts/patch_panvkdbg.py"
 
       - name: Clone base + winlator source
@@ -234,20 +231,12 @@ jobs:
           set -euo pipefail
           rm -rf /tmp/base /tmp/winlator-src
 
-          echo "=============================================="
           echo "Branches available in $WINLATOR_REPO:"
-          echo "=============================================="
           git ls-remote --heads "https://github.com/$WINLATOR_REPO.git" \
             | awk '{print "  " $2}' | sed 's|refs/heads/||' | sort
 
-          echo
-          echo "=============================================="
-          echo "Selecting branch (preferred: $WINLATOR_BRANCH)"
-          echo "=============================================="
-
           CANDIDATES="$WINLATOR_BRANCH winlator-cl winlator main master"
           USED=""
-
           for br in $CANDIDATES; do
             if git ls-remote --heads \
                  "https://github.com/$WINLATOR_REPO.git" \
@@ -255,56 +244,31 @@ jobs:
               USED="$br"
               echo ">>> matched candidate: $br"
               break
-            else
-              echo "    not present: $br"
             fi
           done
-
           if [[ -z "$USED" ]]; then
             USED=$(git ls-remote --symref \
                      "https://github.com/$WINLATOR_REPO.git" HEAD 2>/dev/null \
                    | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')
             echo ">>> no candidate matched; using repo default: ${USED:-<unknown>}"
           fi
-
           if [[ -z "$USED" ]]; then
-            echo "ERROR: could not determine any usable branch from $WINLATOR_REPO" >&2
+            echo "ERROR: no usable branch from $WINLATOR_REPO" >&2
             exit 1
           fi
-
           echo "WINLATOR_BRANCH_USED=$USED" >> "$GITHUB_ENV"
 
-          echo
-          echo "==== cloning base: $BASE_REPO ===="
           git clone --depth 1 "https://github.com/$BASE_REPO.git" /tmp/base
-
-          echo "==== cloning $WINLATOR_REPO @ $USED ===="
           git clone --depth 1 --branch "$USED" \
             "https://github.com/$WINLATOR_REPO.git" /tmp/winlator-src
 
           rm -rf /tmp/base/.git /tmp/winlator-src/.git
-
-          echo
-          echo "==== base top-level ===="
-          ls -A /tmp/base | head -40
-          echo "==== winlator-src top-level ===="
-          ls -A /tmp/winlator-src | head -40
-
-          echo
-          echo "==== does winlator-src contain the CI scripts? ===="
-          if [[ -d /tmp/winlator-src/.github/winlatormali ]]; then
-            ls -la /tmp/winlator-src/.github/winlatormali/
-          else
-            echo "NOTE: .github/winlatormali/ not present on $USED"
-            find /tmp/winlator-src/.github -maxdepth 3 -type f 2>/dev/null || true
-          fi
 
       - name: Copy missing files from winlator source into base
         run: |
           set -euo pipefail
           cd /tmp/winlator-src
 
-          # Build a bash-case pattern for the excluded paths.
           is_excluded() {
             local rel="$1"
             for p in $EXCLUDE_PATHS; do
@@ -315,15 +279,6 @@ jobs:
             return 1
           }
 
-          echo "=============================================="
-          echo "Excluded paths (never copied, never patched):"
-          echo "=============================================="
-          for p in $EXCLUDE_PATHS; do echo "  - $p"; done
-          echo
-
-          echo "=============================================="
-          echo "Files present only in $WINLATOR_BRANCH_USED:"
-          echo "=============================================="
           COUNT=0
           SKIPPED=0
           while IFS= read -r rel; do
@@ -338,9 +293,7 @@ jobs:
             fi
 
             dest="/tmp/base/$rel"
-            if [[ -e "$dest" ]]; then
-              continue
-            fi
+            if [[ -e "$dest" ]]; then continue; fi
 
             mkdir -p "$(dirname "$dest")"
             cp -a "/tmp/winlator-src/$rel" "$dest"
@@ -348,64 +301,35 @@ jobs:
             COUNT=$((COUNT + 1))
           done < <(find . -type f -print | sort)
 
-          echo
-          echo "Total new files copied:   $COUNT"
-          echo "Total files excluded:     $SKIPPED"
+          echo "Total new files copied: $COUNT  excluded: $SKIPPED"
 
       - name: Generate patch (base → winlator) and apply
         run: |
           set -euo pipefail
           cd /tmp
 
-          # Build the list of --exclude=... flags from EXCLUDE_PATHS.
           EXCLUDES=("--exclude=.git")
           for p in $EXCLUDE_PATHS; do
             EXCLUDES+=("--exclude=$p")
           done
 
-          echo "==== diff excludes ===="
-          printf '  %s\n' "${EXCLUDES[@]}"
-
           diff -ruN "${EXCLUDES[@]}" \
             base winlator-src > /tmp/winlator.patch || true
-
-          ls -lh /tmp/winlator.patch
-          echo "---- first 80 lines of patch ----"
-          head -80 /tmp/winlator.patch || true
-          echo "----------------------------------"
 
           cd /tmp/base
           if [[ -s /tmp/winlator.patch ]]; then
             if patch -p1 --batch --forward < /tmp/winlator.patch; then
               echo ">>> patch applied cleanly onto base"
             else
-              echo ">>> patch reported rejects; listing .rej files:"
+              echo ">>> patch reported rejects; listing .rej:"
               find . -name '*.rej' -print || true
             fi
           else
-            echo ">>> patch is empty — no differences on common files"
+            echo ">>> patch empty"
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/winlator-patch"
           cp /tmp/winlator.patch "$GITHUB_WORKSPACE/winlator-patch/"
-
-      - name: Sanity check — no workflow files changed
-        run: |
-          set -euo pipefail
-          cd /tmp/base
-          if [[ -d .github/workflows ]]; then
-            echo "==== .github/workflows contents (must be OUR files only) ===="
-            ls -la .github/workflows/
-            echo
-            echo "==== any file mentioning 'winlatormali-ci' under workflows? ===="
-            if grep -rl 'winlatormali-ci' .github/workflows/ 2>/dev/null; then
-              echo "WARNING: winlatormali-ci references found — would break the push"
-            else
-              echo "OK: no foreign workflow references"
-            fi
-          else
-            echo "(no .github/workflows in merged tree)"
-          fi
 
       - name: Apply python patcher
         run: |
@@ -419,9 +343,7 @@ jobs:
           cd /tmp/base
           while IFS= read -r f; do
             case "$f" in
-              *.sh|*.bash|*.py|*.pl|*.rb|*.zsh)
-                chmod +x "$f" || true
-                ;;
+              *.sh|*.bash|*.py|*.pl|*.rb|*.zsh) chmod +x "$f" || true ;;
             esac
           done < <(find . -type f -print)
 
@@ -430,22 +352,26 @@ jobs:
           set -euo pipefail
           cd /tmp/base
 
+          echo "=============================================="
+          echo "Stripping .github/workflows from the tree"
+          echo "=============================================="
+          rm -rf .github/workflows
+          find . -path './.git' -prune -o -type d -empty -print -delete 2>/dev/null || true
+
           git init -q -b "$TARGET_BRANCH"
           git config user.email "github-actions@users.noreply.github.com"
           git config user.name  "github-actions"
+
+          git remote add origin \
+            "https://x-access-token:${{ secrets.GH_PUSH_TOKEN || secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+
           git add -A
           git commit -q -m "winlator: mixed source $(date -u +%Y%m%d-%H%M%S)"
-
           git --no-pager log -1 --oneline
-          git --no-pager diff --stat HEAD~1 2>/dev/null | tail -20 || true
+          echo ">>> workflows in this commit:"
+          git ls-files .github/workflows/ 2>/dev/null || echo "    (none)"
 
-          # GITHUB_TOKEN is sufficient now: .github/workflows is excluded
-          # from both the copy and the diff, so the push never modifies
-          # workflow files.
-          git remote add origin \
-            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
-
-          echo ">>> force-pushing to origin/$TARGET_BRANCH"
+          echo ">>> force-pushing with PAT (workflow scope)"
           git push --force origin "$TARGET_BRANCH"
           echo ">>> push done"
 
@@ -470,18 +396,15 @@ jobs:
         with:
           ref: winlator
           fetch-depth: 1
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Report checked-out commit and CI scripts
         run: |
           set -euo pipefail
           git --no-pager log -1 --oneline
-          echo "---- workspace top ----"
           ls -A | head -40
-          echo "---- .github/winlatormali ----"
-          ls -la .github/winlatormali/ 2>/dev/null || echo "  (missing)"
-          echo "---- .github/workflows ----"
-          ls -la .github/workflows/ 2>/dev/null || echo "  (missing)"
+          ls -la .github/winlatormali/ 2>/dev/null || echo "  (.github/winlatormali missing)"
+          ls -la .github/workflows/ 2>/dev/null || echo "  (.github/workflows missing — expected)"
 
       - name: Verify build scripts are present
         run: |
@@ -496,7 +419,6 @@ jobs:
             fi
           done
           if [[ "$MISSING" -eq 1 ]]; then
-            echo "---- .github/ contents on this branch ----"
             find .github -maxdepth 3 -type f 2>/dev/null || true
             exit 1
           fi
@@ -583,22 +505,13 @@ jobs:
             **Commit:** `${{ github.sha }}`
 
             ### Source provenance
-            Built from the `winlator` branch, generated by:
-            - Cloning base repo `xodiosx/mesa-panvk-mali-g57`
-            - Cloning `mexicanbr0auth/mesa-panvk-g57` (winlator-cl branch)
-            - Copying files that exist only in the winlator source into base
-              (excluding `.github/workflows/`)
-            - Patching files that exist in both trees with the diff
-              (excluding `.github/workflows/`)
-            - Applying PANVKDBG neutralizer + driver rename patcher
+            - Base: `xodiosx/mesa-panvk-mali-g57`
+            - Winlator source: `mexicanbr0auth/mesa-panvk-g57` (winlator-cl)
+            - Copied missing files, patched common files, applied
+              PANVKDBG neutralizer + driver rename.
+            - `.github/workflows` intentionally not modified.
 
             Pre-patch diff attached as `winlator.patch`.
-
-            ### Customizations
-            - PANVKDBG debug statements neutralized at the source level.
-            - PanVK driver name reported in
-              `VkPhysicalDeviceDriverProperties::driverName` is `panvcake`.
-            - PanVK driver ID changed to `(VkDriverId)0x0000CAFE`.
 
             ### Files
             - `PanVK-G57-WinlatorMali-candidate-*.zip` — packaged driver
