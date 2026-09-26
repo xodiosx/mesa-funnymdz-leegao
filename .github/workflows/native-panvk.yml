@@ -1,4 +1,4 @@
-name: release PanVK + Zink for Termux (aarch64, native)
+name: release PanVK + Zink for winlator (aarch64, native)
 
 on:
   push:
@@ -62,20 +62,31 @@ jobs:
           esac
           echo "types=$TYPES" >> "$GITHUB_OUTPUT"
 
-  build:
-    needs: prepare
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        build-type: ${{ fromJSON(needs.prepare.outputs.types) }}
-
+  prepare-winlator-branch:
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      BASE_REPO: "xodiosx/mesa-panvk-mali-g57"
+      WINLATOR_REPO: "Mateus-tokokudo/mesa-funnymdzz"
+      WINLATOR_BRANCH: "winlatormali-ci"
+      TARGET_BRANCH: "winlator"
     steps:
-      - name: Checkout
+      - name: Checkout (for push credentials)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git credentials
+        run: |
+          set -euo pipefail
+          git config --local user.email "github-actions@users.noreply.github.com"
+          git config --local user.name  "github-actions"
+          git remote set-url origin \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git remote -v
 
       - name: Write patcher script
         run: |
@@ -115,7 +126,6 @@ jobs:
               (re.compile(r'"panvk"'),      '"panvcake"'),
           ]
 
-
           def _find_close_paren(src, open_paren_idx):
               depth = 0
               i = open_paren_idx
@@ -149,7 +159,6 @@ jobs:
                   i += 1
               return None
 
-
           def silence_fprintf(src):
               src = REWRAP_RE.sub("", src)
               out = []
@@ -160,26 +169,21 @@ jobs:
                   if idx == -1:
                       out.append(src[i:])
                       break
-
                   m = START_RE.match(src, idx)
                   if not m:
                       out.append(src[i:idx + len("fprintf")])
                       i = idx + len("fprintf")
                       continue
-
                   open_paren = src.find("(", m.start())
                   close_paren = _find_close_paren(src, open_paren)
                   if close_paren is None:
                       out.append(src[i:])
                       break
-
                   out.append(src[i:idx])
                   out.append("(void)0")
                   i = close_paren
                   count += 1
-
               return "".join(out), count
-
 
           def rename_driver(src):
               n_name = 0
@@ -191,18 +195,15 @@ jobs:
               n_id += k
               return src, n_name, n_id
 
-
           def main():
               for root in ROOTS:
                   if not root.exists():
                       print(f"ERROR: {root} not found", file=sys.stderr)
                       return 1
-
               total_neutralized = 0
               total_names = 0
               total_ids = 0
               files_modified = 0
-
               for root in ROOTS:
                   for path in sorted(root.rglob("*")):
                       if path.suffix not in (".c", ".h", ".cpp", ".cc",
@@ -212,15 +213,12 @@ jobs:
                           src = path.read_text()
                       except UnicodeDecodeError:
                           continue
-
                       orig = src
-
                       if '"PANVKDBG' in src:
                           src, n = silence_fprintf(src)
                           if n:
                               print(f"{path}: neutralized {n} PANVKDBG call(s)")
                               total_neutralized += n
-
                       before = src
                       src, n_name, n_id = rename_driver(src)
                       if src != before:
@@ -229,19 +227,15 @@ jobs:
                                     f"({n_name} name, {n_id} id)")
                               total_names += n_name
                               total_ids += n_id
-
                       if src != orig:
                           path.write_text(src)
                           files_modified += 1
-
               print()
               print(f"Files modified:                   {files_modified}")
               print(f"PANVKDBG calls neutralized:       {total_neutralized}")
               print(f"Driver-name strings renamed:      {total_names}")
               print(f"Driver-ID occurrences replaced:   {total_ids}")
-
               return 0
-
 
           if __name__ == "__main__":
               sys.exit(main())
@@ -250,90 +244,156 @@ jobs:
           echo "--- wrote ci-scripts/patch_panvkdbg.py ---"
           wc -l "${{ github.workspace }}/ci-scripts/patch_panvkdbg.py"
 
-      # ─────────────────────────────────────────────────────────────
-      # Clone the source repo, apply our patcher, and sync into the
-      # current repo. Runs entirely on the runner (simple permissions).
-      # ─────────────────────────────────────────────────────────────
-      - name: Clone source repo and apply patcher
+      - name: Clone base + winlatormali-ci
         run: |
           set -euo pipefail
-          SRC="${{ github.workspace }}/_src"
-          rm -rf "$SRC"
-          git clone --depth 1 \
-            https://github.com/mexicanbr0auth/mesa-panvk-g57.git "$SRC"
+          rm -rf /tmp/base /tmp/winlator-src
 
-          cd "$SRC"
-          echo "=============================================="
-          echo "Applying patcher to source repo ..."
-          echo "=============================================="
-          python3 "${{ github.workspace }}/ci-scripts/patch_panvkdbg.py"
+          echo "==== cloning base: $BASE_REPO ===="
+          git clone --depth 1 "https://github.com/$BASE_REPO.git" /tmp/base
 
-          echo "=============================================="
-          echo "Patcher done. Diff summary vs pristine remote ..."
-          echo "=============================================="
-          cd "$SRC"
-          git --no-pager diff --stat || true
+          echo "==== cloning $WINLATOR_REPO @ $WINLATOR_BRANCH ===="
+          git clone --depth 1 --branch "$WINLATOR_BRANCH" \
+            "https://github.com/$WINLATOR_REPO.git" /tmp/winlator-src
 
-      - name: Overlay source repo into workspace
+          rm -rf /tmp/base/.git /tmp/winlator-src/.git
+
+          echo "==== base top-level ===="
+          ls -A /tmp/base | head -40
+          echo "==== winlator-src top-level ===="
+          ls -A /tmp/winlator-src | head -40
+
+      - name: Copy missing files from winlatormali-ci into base
         run: |
           set -euo pipefail
-          SRC="${{ github.workspace }}/_src"
-          DST="${{ github.workspace }}"
+          cd /tmp/winlator-src
 
-          echo "--- syncing $SRC -> $DST (excluding VCS + markdown + binaries) ---"
-          rsync -a --delete \
-            --exclude='.git/' \
-            --exclude='.github/' \
-            --exclude='*.md' \
-            --exclude='*.tar.gz' \
-            --exclude='*.tar.xz' \
-            --exclude='*.zip' \
-            --exclude='_src/' \
-            --exclude='ci-scripts/' \
-            --exclude='termux-out-*/' \
-            --exclude='build*/' \
-            "$SRC/" "$DST/"
+          echo "=============================================="
+          echo "Files present only in winlatormali-ci:"
+          echo "=============================================="
+          COUNT=0
+          while IFS= read -r rel; do
+            rel="${rel#./}"
+            [[ -z "$rel" ]] && continue
+            [[ "$rel" == ".git"* ]] && continue
 
-          rm -rf "$SRC"
-          echo "--- workspace top-level after overlay ---"
-          ls -A "$DST" | head -40
+            dest="/tmp/base/$rel"
+            if [[ -e "$dest" ]]; then
+              # Exists in base — will be handled by the normal patch.
+              continue
+            fi
 
-      - name: Commit and push synced source to current repo
+            mkdir -p "$(dirname "$dest")"
+            cp -a "/tmp/winlator-src/$rel" "$dest"
+            echo "  + $rel"
+            COUNT=$((COUNT + 1))
+          done < <(find . -type f -print | sort)
+
+          echo
+          echo "Total new files copied: $COUNT"
+
+      - name: Generate patch (base → winlatormali-ci) and apply
         run: |
           set -euo pipefail
-          cd "${{ github.workspace }}"
+          cd /tmp
 
+          # Now that missing files have been copied, the diff contains only
+          # differences on files that exist in BOTH trees. New files are
+          # already in place and therefore identical in both trees.
+          diff -ruN \
+            --exclude='.git' \
+            base winlator-src > /tmp/winlator.patch || true
+
+          ls -lh /tmp/winlator.patch
+          echo "---- first 80 lines of patch ----"
+          head -80 /tmp/winlator.patch || true
+          echo "----------------------------------"
+
+          cd /tmp/base
+          if [[ -s /tmp/winlator.patch ]]; then
+            if patch -p1 --batch --forward < /tmp/winlator.patch; then
+              echo ">>> patch applied cleanly onto base"
+            else
+              echo ">>> patch reported rejects; listing .rej files:"
+              find . -name '*.rej' -print || true
+            fi
+          else
+            echo ">>> patch is empty — no differences on common files"
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/winlator-patch"
+          cp /tmp/winlator.patch "$GITHUB_WORKSPACE/winlator-patch/"
+
+      - name: Apply python patcher
+        run: |
+          set -euo pipefail
+          cd /tmp/base
+          python3 "$GITHUB_WORKSPACE/ci-scripts/patch_panvkdbg.py"
+
+      - name: Restore executable bits
+        run: |
+          set -euo pipefail
+          cd /tmp/base
+          while IFS= read -r f; do
+            case "$f" in
+              *.sh|*.bash|*.py|*.pl|*.rb|*.zsh)
+                chmod +x "$f" || true
+                ;;
+            esac
+          done < <(find . -type f -print)
+
+      - name: Commit and force-push to winlator branch
+        run: |
+          set -euo pipefail
+          cd /tmp/base
+
+          git init -q -b "$TARGET_BRANCH"
           git config user.email "github-actions@users.noreply.github.com"
           git config user.name  "github-actions"
+          git add -A
+          git commit -q -m "winlator: mixed source $(date -u +%Y%m%d-%H%M%S)"
 
-          git add -A -- \
-            ':(exclude)ci-scripts' \
-            ':(exclude)termux-out-*' \
-            ':(exclude)build-*'
+          git --no-pager log -1 --oneline
+          git --no-pager diff --stat HEAD~1 2>/dev/null | tail -20 || true
 
-          if git diff --cached --quiet; then
-            echo ">>> No source changes to commit."
-          else
-            echo "--- staged changes summary ---"
-            git diff --cached --stat | tail -40
-            echo "--- end summary ---"
+          git remote add origin \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
 
-            BRANCH="${{ github.ref_name }}"
-            if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-              BRANCH="main"
-            fi
-            echo ">>> pushing to branch: ${BRANCH}"
+          echo ">>> force-pushing to origin/$TARGET_BRANCH"
+          git push --force origin "$TARGET_BRANCH"
+          echo ">>> push done"
 
-            git commit -m "CI: sync patched Mesa tree from xodiosx/mesa-panvk-mali-g57 ($(date -u +%Y%m%d-%H%M%S))"
-            git push origin "HEAD:refs/heads/${BRANCH}"
-            echo ">>> push succeeded"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Upload winlator.patch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: winlator-source-patch-${{ needs.prepare.outputs.stamp }}
+          path: ${{ github.workspace }}/winlator-patch/winlator.patch
+          if-no-files-found: warn
 
-      # ─────────────────────────────────────────────────────────────
-      # Build inside the Termux container.
-      # ─────────────────────────────────────────────────────────────
+  build:
+    needs: [prepare, prepare-winlator-branch]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        build-type: ${{ fromJSON(needs.prepare.outputs.types) }}
+
+    steps:
+      - name: Checkout winlator branch
+        uses: actions/checkout@v4
+        with:
+          ref: winlator
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Report checked-out commit
+        run: |
+          set -euo pipefail
+          git --no-pager log -1 --oneline
+          echo "---- workspace top ----"
+          ls -A | head -40
+
       - name: Build PanVK + Zink (${{ matrix.build-type }}) inside Termux container
         run: |
           set -euo pipefail
@@ -342,8 +402,8 @@ jobs:
           chmod 777 "${{ github.workspace }}/termux-out-${{ matrix.build-type }}"
 
           docker run --rm \
+            -v "${{ github.workspace }}:/src:ro" \
             -v "${{ github.workspace }}/termux-out-${{ matrix.build-type }}:/termux-out" \
-            -v "${{ github.workspace }}/ci-scripts:/ci-scripts:ro" \
             termux/termux-docker:aarch64 \
             bash -c '
               set -euo pipefail
@@ -355,9 +415,7 @@ jobs:
                 > "$PREFIX/etc/apt/sources.list.d/termux-main.list"
 
               for i in 1 2 3; do
-                if pkg update -y; then
-                  break
-                fi
+                if pkg update -y; then break; fi
                 echo "pkg update attempt $i failed, retrying in 10s..."
                 sleep 10
                 if [[ $i -eq 3 ]]; then
@@ -387,57 +445,15 @@ jobs:
 
               mkdir -p "$TMPDIR"
               cd "$TMPDIR"
-              rm -rf mesa-panvk mesa-panvk-pristine
-              git clone --depth 1 https://github.com/xodiosx/mesa-panvk-mali-g57.git mesa-panvk
-
-              echo "=============================================="
-              echo "Snapshotting pristine clone for diff ..."
-              echo "=============================================="
-              cp -a mesa-panvk mesa-panvk-pristine
-              du -sh mesa-panvk-pristine
-
+              rm -rf mesa-panvk
+              cp -a /src mesa-panvk
               cd mesa-panvk
 
-              echo "=============================================="
-              echo "Neutralizing PANVKDBG calls and renaming driver ..."
-              echo "=============================================="
-              python3 /ci-scripts/patch_panvkdbg.py
+              rm -rf .github ci-scripts winlator-patch termux-out-* build-bionic build-host || true
 
-              echo "=============================================="
-              echo "Generating patcher diff (pristine -> patched) ..."
-              echo "=============================================="
-              cd "$TMPDIR"
+              echo "==== source tree top ===="
+              ls -A | head -40
 
-              set +e
-              diff -ruN \
-                --exclude=.git \
-                --exclude=.github \
-                --exclude=build-bionic \
-                --exclude=build-host \
-                mesa-panvk-pristine mesa-panvk \
-                > /termux-out/panvk-patcher-diff.patch
-              DIFF_RC=$?
-              set -e
-              echo "diff exit code: $DIFF_RC  (0=identical, 1=differences, 2=error)"
-
-              set +e
-              diff -rq \
-                --exclude=.git \
-                --exclude=.github \
-                --exclude=build-bionic \
-                --exclude=build-host \
-                mesa-panvk-pristine mesa-panvk \
-                > /termux-out/panvk-patcher-diff-summary.txt 2>&1
-              set -e
-
-              ls -lh /termux-out/panvk-patcher-diff.patch \
-                     /termux-out/panvk-patcher-diff-summary.txt
-
-              cd mesa-panvk
-
-              echo "=============================================="
-              echo "Informational: residual PANVKDBG literals in tree ..."
-              echo "=============================================="
               RESIDUAL=$(grep -r "\"PANVKDBG" src/panfrost/ | wc -l || true)
               echo "Residual \"PANVKDBG literals in source tree: $RESIDUAL"
 
@@ -464,14 +480,8 @@ jobs:
                 -Dperfetto=false \
                 -Dprefix="$PREFIX"
 
-              echo "=============================================="
-              echo "Building entire tree (panvk + zink + GL/EGL) ..."
-              echo "=============================================="
               ninja -C build-bionic -j$(nproc)
 
-              echo "=============================================="
-              echo "Informational: PANVKDBG strings in built panvk .so ..."
-              echo "=============================================="
               SO_STRINGS=$(strings build-bionic/src/panfrost/vulkan/libvulkan_panfrost.so \
                              | grep -c "^PANVKDBG" || true)
               echo "PANVKDBG strings in freshly built panvk .so: $SO_STRINGS"
@@ -526,29 +536,17 @@ jobs:
           tar -czvf "../${TARBALL}" lib/ share/
           ls -lh "../${TARBALL}"
 
-      - name: Upload patcher diff (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: panvk-patcher-diff-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}
-          path: |
-            termux-out-${{ matrix.build-type }}/panvk-patcher-diff.patch
-            termux-out-${{ matrix.build-type }}/panvk-patcher-diff-summary.txt
-          if-no-files-found: warn
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: panvk-zink-termux-aarch64-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}
           path: |
             termux-out-${{ matrix.build-type }}/
-            !termux-out-${{ matrix.build-type }}/panvk-patcher-diff.patch
-            !termux-out-${{ matrix.build-type }}/panvk-patcher-diff-summary.txt
             panvk-zink-termux-aarch64-${{ matrix.build-type }}-${{ needs.prepare.outputs.stamp }}.tar.gz
           if-no-files-found: error
 
   release:
-    needs: [prepare, build]
+    needs: [prepare, prepare-winlator-branch, build]
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
@@ -562,9 +560,7 @@ jobs:
 
       - name: Drop empty artifact files
         run: |
-          echo "--- removing empty files ---"
           find artifacts -type f -empty -print -delete || true
-          echo "--- files after ---"
           find artifacts -type f -exec ls -lh {} \;
 
       - name: Create GitHub Release
@@ -583,66 +579,40 @@ jobs:
             **Commit:** `${{ github.sha }}`
             **Build types:** `${{ needs.prepare.outputs.types }}`
 
+            ### Source provenance
+            Built from the `winlator` branch, generated by:
+            - Cloning base repo `xodiosx/mesa-panvk-mali-g57`
+            - Cloning `winlatormali-ci` from `Mateus-tokokudo/mesa-funnymdzz`
+            - Copying files that exist only in `winlatormali-ci` into base
+              (workflow scripts, CI assets, etc.)
+            - Patching files that exist in both trees with the diff
+            - Applying PANVKDBG neutralizer + driver rename patcher
+
+            The pre-patch diff is attached as `winlator.patch`.
+
             ### What is included
             - **PanVK** — Vulkan driver for Mali-G57 (Valhall JM) via kbase
-            - **Zink** — Gallium driver that provides OpenGL/GLES on top of
-              Vulkan.
+            - **Zink** — Gallium driver for OpenGL/GLES on top of Vulkan.
 
             ### Customizations
-            - PANVKDBG debug statements are neutralized at the source
-              level before compilation.
+            - PANVKDBG debug statements neutralized at the source level.
             - PanVK driver name reported in
-              `VkPhysicalDeviceDriverProperties::driverName` is set to
-              **`panvcake`**.
-            - PanVK driver ID changed from `VK_DRIVER_ID_MESA_PANVK` to
-              `(VkDriverId)0x0000CAFE`.
+              `VkPhysicalDeviceDriverProperties::driverName` is `panvcake`.
+            - PanVK driver ID changed to `(VkDriverId)0x0000CAFE`.
 
             ### Files
-            - `panvk-zink-termux-aarch64-debugoptimized-${{ needs.prepare.outputs.stamp }}.tar.gz`
-            - `panvk-zink-termux-aarch64-release-${{ needs.prepare.outputs.stamp }}.tar.gz`
+            - `panvk-zink-termux-aarch64-debugoptimized-*.tar.gz`
+            - `panvk-zink-termux-aarch64-release-*.tar.gz`
             - `libvulkan_panfrost.so` — PanVK Vulkan driver
             - `libgallium_dri.so` — contains the Zink Gallium driver
             - `panfrost_icd.aarch64.json` — ICD manifest
-            - `panvk-patcher-diff.patch` — source diff (pristine → patched)
-
-            ### Install (Termux)
-
-            ```bash
-            RELEASE_TAG="${{ needs.prepare.outputs.tag }}"
-            RELEASE_STAMP="${{ needs.prepare.outputs.stamp }}"
-            RELEASE_REPO="${{ github.repository }}"
-
-            curl -L -o panvk-zink-termux-aarch64-release-${RELEASE_STAMP}.tar.gz \
-              "https://github.com/${RELEASE_REPO}/releases/download/${RELEASE_TAG}/panvk-zink-termux-aarch64-release-${RELEASE_STAMP}.tar.gz"
-
-            tar -xzf panvk-zink-termux-aarch64-release-${RELEASE_STAMP}.tar.gz -C $PREFIX
-            export DISPLAY=:0
-            ```
-
-            ### Run Vulkan (PanVK)
-
-            ```bash
-            export VK_ICD_FILENAMES=$PREFIX/share/vulkan/icd.d/panfrost_icd.aarch64.json
-            vkmark
-            ```
-
-            ### Run OpenGL/GLES (Zink)
-
-            ```bash
-            export MESA_LOADER_DRIVER_OVERRIDE=zink
-            export GALLIUM_DRIVER=zink
-            export WSI_X11_TERMUX=1
-            export PANVK_NO_AFBC=1
-            export PANVK_SPLIT_SUBMIT=1
-            glmark2
-            ```
+            - `winlator.patch` — diff of files present in both trees
           files: |
             artifacts/*.tar.gz
             artifacts/**/libvulkan_panfrost.so
             artifacts/**/libgallium_dri.so
             artifacts/**/panfrost_icd.aarch64.json
-            artifacts/**/panvk-patcher-diff.patch
-            artifacts/**/panvk-patcher-diff-summary.txt
+            artifacts/**/winlator.patch
           overwrite_files: true
           generate_release_notes: true
           prerelease: true
