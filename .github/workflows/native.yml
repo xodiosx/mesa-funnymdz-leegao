@@ -186,7 +186,7 @@ jobs:
 
               cd "$TMPDIR"
               rm -rf mesa-panvk
-              git clone --depth 1 https://github.com/xodiosx/mesa-panvk-g57.git mesa-panvk
+              git clone --depth 1 https://github.com/xodiosx/mesa-panvk-mali-g57.git mesa-panvk
               cd mesa-panvk
 
               echo "=============================================="
@@ -195,8 +195,8 @@ jobs:
               REF_DIR="$TMPDIR/winlatormali-ref"
               rm -rf "$REF_DIR"
               git clone --depth 1 \
-                --branch main \
-                https://github.com/crowndoom/mesa-panvk-g57.git \
+                --branch winlatormali-ci \
+                https://github.com/mexicanbr0auth/mesa-panvk-g57 \
                 "$REF_DIR"
 
               # ═══════════════════════════════════════════════════════
@@ -265,7 +265,7 @@ jobs:
               PATCHES=()
               while IFS= read -r f; do
                 [[ -n "$f" ]] && PATCHES+=("$f")
-              done < <(find . -maxdepth 1 -name "*.patch" -type f -print | sort)
+              done < <(find . -maxdepth 1 -name "*.patch2" -type f -print | sort)
 
               if [[ ${#PATCHES[@]} -eq 0 ]]; then
                 echo ">>> No .patch files found in repo root; nothing to apply."
@@ -308,9 +308,9 @@ jobs:
               echo "=============================================="
 
               MESON_SH="$TMPDIR/meson_cmd.sh"
-              rm -f "$MESON_SH"
-              python3 /ci-scripts/gen_meson_cmd.py > "$MESON_SH"
-              cat "$MESON_SH"
+              #rm -f "$MESON_SH"
+              #python3 /ci-scripts/gen_meson_cmd.py > "$MESON_SH"
+              #cat "$MESON_SH"
               bash "$MESON_SH"
 
               echo "=============================================="
